@@ -11,6 +11,7 @@ from tensorflow.python.client import device_lib
 from IPython.display import display, HTML
 import logging
 
+
 logger = logging.getLogger('gpu_compute')
 logger.setLevel(logging.DEBUG)
 fh = logging.FileHandler('gpu_compute.log')
@@ -213,6 +214,7 @@ class LSTM(object):
     def get_tf_normal_variable(shape, mean=0.0, stddev=0.6, name=None):
         return tf.Variable(tf.truncated_normal(shape, mean=mean, stddev=stddev),
                            validate_shape=False, name=name)
+
 
     def create_lstm_graph(self, n_input_features=None, reset_graph=True, log=None, verbose=0):
         """Build the Tensorflow based LSTM network
@@ -437,11 +439,22 @@ class LSTM(object):
                         writer=writer
                     )
 
-    def train(self, data_feeder, restore_model=False, pre_trained_model=None,
-              epoch_prev=0, epoch_end=21, step=1, writer_step=1, display_step=50,
-              return_weights=False, log=None, verbose=0):
+
+    def train(self, batch_X=None, batch_y=None, in_sample_size=None, data_feeder=None,
+              restore_model=False, pre_trained_model=None, epoch_prev=0, epoch_end=21,
+              step=1, writer_step=1, display_step=50, return_weights=False, log=None, verbose=0):
         """Perform training of the LSTM network on specified compute device.
-        data_feeder is a generator function that feeds in a mini-batch of data
+        There are two ways of feeding in data:
+
+        (1) Directly pass in batch_X, batch_y, in_sample_size;
+        (2) Passing in a data_feeder as a data generator.
+
+        If both are provided, the direct data will take precedence over data_feeder.
+
+        Model persistence:
+            Model persistence is also built into the class.  As long as model_saver and model_dir have been
+
+        Return: A compiled dictionary of various outputs from training.
         """
         if log is None:
             log = logger
@@ -581,8 +594,8 @@ class LSTM(object):
                         writer_step += 1
                         toc = time() - tic
                         log.info(
-                            f"[{self.sessid}] Iter:{step}, LR:{current_rate:.5f}, mbatch loss: {loss_val:.1f},, " \
-                            f"mbatch in-sample corr:{pearson_corr_is_val:7.4f}, oos corr:{pearson_corr_oos_val:7.4f} " \
+                            f"[{self.sessid}] Iter:{step}, LR:{current_rate:.5f}, mbatch loss: {loss_val:.1f},, "
+                            f"mbatch in-sample corr:{pearson_corr_is_val:7.4f}, oos corr:{pearson_corr_oos_val:7.4f} "
                             f"({in_sample_size}/{total_sample_size})), {toc:.1f}s elapsed."
                         )
                     step += 1  # finishes this id, continue to next id step
