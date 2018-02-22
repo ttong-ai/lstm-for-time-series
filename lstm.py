@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-# author: ttong1013
+# author: Tony Tong (taotong@berkeley.edu)
 
 import numpy as np
 import random
 import string
+import os
+from time import time
 import tensorflow as tf
 from tensorflow.python.client import device_lib
 from IPython.display import display, HTML
@@ -79,8 +81,8 @@ class LSTM(object):
                  n_states=50, n_layers=1, n_time_steps=10,
                  activation=tf.nn.relu, keep_prob=0.5, l1_reg=1e-2, l2_reg=1e-3,
                  start_learning_rate=0.001, decay_steps=1, decay_rate=0.3,
-                 iter_per_id=10, forward_step=1, create_graph=True,
-                 scope='lstm', logdir='logs'):
+                 inner_iteration=10, forward_step=1, create_graph=True,
+                 scope='lstm', log_dir='logs', model_dir='saved_models'):
         self.n_input_features = n_input_features
         self.n_output_features = n_output_features
         self.batch_size = batch_size
@@ -94,7 +96,7 @@ class LSTM(object):
         self.start_learning_rate = start_learning_rate
         self.decay_steps = decay_steps
         self.decay_rate = decay_rate
-        self.iter_per_id = iter_per_id
+        self.inner_iteration = inner_iteration
         self.forward_step = forward_step
         self.sessid = None
         self.device_list = None
@@ -102,7 +104,23 @@ class LSTM(object):
         self.graph_keys = None
         self.graph_ready = False
         self.scope = scope
-        self.logdir = logdir
+        self.log_dir = log_dir
+        self.model_saver = None
+        self.model_dir = model_dir
+
+        # results holder
+        self.all_actual = None
+        self.all_predicted = None
+        self.all_epochs = []
+        self.all_losses_per_epoch = []
+        self.all_corr_oos_per_epoch = []
+        self.all_corr_is = []
+        self.all_corr_oos = []
+
+        self.lstm_kernel_weights = None
+        self.lstm_kernel_biases = None
+        self.fc_weights = None
+        self.fc_biases = None
 
         # Locate available computing devices and save in self.device_list
         self.device_list = self.find_compute_devices()
@@ -119,7 +137,7 @@ class LSTM(object):
                 self.create_lstm_graph(n_input_features=n_input_features)
                 self.graph_ready = True
             except Exception as msg:
-                print("Exception occured during graph creation.  Check input parameters, especially n_input_features.")
+                print("Exception occurred during graph creation.  Check input parameters, especially n_input_features.")
                 print("Exception message: ", msg)
                 self.graph_ready = False
 
@@ -127,15 +145,19 @@ class LSTM(object):
                  n_states=50, n_layers=1, n_time_steps=10,
                  activation=tf.nn.relu, keep_prob=0.5, l1_reg=1e-2, l2_reg=1e-3,
                  start_learning_rate=0.001, decay_steps=1, decay_rate=0.3,
-                 iter_per_id=10, forward_step=1, create_graph=True, scope='lstm'):
-        # A wrapper for calling the __init__ function
+                 iter_per_id=10, forward_step=1, create_graph=True,
+                 scope='lstm', log_dir='logs', model_dir='saved_models'):
+        """A wrapper for calling the __init__ function"""
+
         if self.graph is not None:
             del self.graph
+
         self.__init__(n_input_features=n_input_features, n_output_features=n_output_features, batch_size=batch_size,
                       n_states=n_states, n_layers=n_layers, n_time_steps=n_time_steps,
                       activation=activation, keep_prob=keep_prob, l1_reg=l1_reg, l2_reg=l2_reg,
                       start_learning_rate=start_learning_rate, decay_steps=decay_steps, decay_rate=decay_rate,
-                      iter_per_id=iter_per_id, forward_step=forward_step, create_graph=create_graph, scope='lstm')
+                      inner_iteration=iter_per_id, forward_step=forward_step, create_graph=create_graph,
+                      scope=scope, log_dir=log_dir, model_dir=model_dir)
 
     def logging_session_parameters(self, log=None):
         if log is None:
@@ -152,7 +174,7 @@ class LSTM(object):
         log.info(f"[{self.sessid}] Start learning rate: {self.start_learning_rate}")
         log.info(f"[{self.sessid}] Learning rate decay steps: {self.decay_steps}")
         log.info(f"[{self.sessid}] Learning rate decay rate: {self.decay_rate}")
-        log.info(f"[{self.sessid}] Inner iteration per id: {self.iter_per_id}")
+        log.info(f"[{self.sessid}] Inner iteration per id: {self.inner_iteration}")
         log.info(f"[{self.sessid}] Forward prediction period: {self.forward_step}")
 
     @staticmethod
@@ -215,7 +237,6 @@ class LSTM(object):
 
         # Build the network on the specified compute device
         with tf.device(self.compute_device):
-
             # Set this graph as the default
             with self.graph.as_default():
                 with tf.name_scope(self.scope):
@@ -263,15 +284,17 @@ class LSTM(object):
                             # Use dynamic_rnn to dynamically unroll the time steps when doing the computation
                             # outputs contain the output from all the time steps, so it should have
                             # shape [batch_size, n_time_steps, n_states]
-                            # When time_major is set to True, the outputs shape should be [n_time_steps, batch_size, n_states]
-                            # states contain the all the internal states at the last time step.  It is a tuple with elements
-                            # corresponding to n_layers. Each tuple element itself is a LSTMStateTuple with c and h tensors.
+                            # When time_major is set to True, the outputs shape should be
+                            # [n_time_steps, batch_size, n_states]
+                            # states contain the all the internal states at the last time step.
+                            # It is a tuple with elements corresponding to n_layers. Each tuple element itself
+                            # is a LSTMStateTuple with c and h tensors.
                             outputs, states = tf.nn.dynamic_rnn(cell=multilayer_cell, inputs=X,
-                                                                initial_state=None, dtype=tf.float32,  # tuple(init_states)
+                                                                initial_state=None, dtype=tf.float32, #tuple(init_states)
                                                                 swap_memory=True, time_major=False)
 
-                        # Use a fully-connected layer to convert the multi-state vector into a single scalar representing
-                        # the variable to be predicted
+                        # Use a fully-connected layer to convert the multi-state vector into a single
+                        # scalar representing the variable to be predicted
                         with tf.name_scope('fc1'):
                             with tf.name_scope('W'):
                                 W_fc1 = self.get_tf_normal_variable([self.n_states, self.n_output_features],
@@ -331,18 +354,20 @@ class LSTM(object):
 
                     with tf.name_scope('hyperparameters'):
                         # set up adaptive learning rate:
-                        # Ratio of global_step / decay_steps is designed to indicate how far we've progressed in training.
+                        # Ratio of global_step / decay_steps is designed to indicate how far we've
+                        # progressed in training.
                         # the ratio is 0 at the beginning of training and is 1 at the end.
                         global_step = tf.placeholder(tf.float32, name='global_step')
 
                         # tf.train.exponetial_decay is calculated as:
                         #     decayed_learning_rate = learning_rate * decay_rate ^ (global_step / decay_steps)
-                        # adaptive_learning_rate will thus change from the starting learningRate to learningRate * decay_rate
-                        # in order to simplify the code, we are fixing the total number of decay steps at 1 and pass global_step
-                        # as a fraction that starts with 0 and tends to 1.
+                        # adaptive_learning_rate will thus change from the starting learningRate to
+                        # learningRate * decay_rate
+                        # in order to simplify the code, we are fixing the total number of decay steps at 1
+                        # and pass global_step as a fraction that starts with 0 and tends to 1.
                         adaptive_learning_rate = tf.train.exponential_decay(
                             learning_rate=self.start_learning_rate,  # Start with this learning rate
-                            global_step=global_step,  # global_step / total_steps shows how far we've progressed in training
+                            global_step=global_step,  # global_step/total_steps shows progress in training
                             decay_steps=self.decay_steps,
                             decay_rate=self.decay_rate
                         )
@@ -368,6 +393,9 @@ class LSTM(object):
                     with tf.name_scope('optimizer'):
                         optimizer = tf.train.AdamOptimizer(learning_rate=adaptive_learning_rate).minimize(loss)
 
+                    with tf.name_scope('init'):
+                        init = tf.global_variables_initializer()
+
                     with tf.name_scope('summary'):
                         tf.summary.tensor_summary("pearson_corr_is", pearson_corr_is)
                         tf.summary.tensor_summary("pearson_corr_oos", pearson_corr_oos)
@@ -377,30 +405,221 @@ class LSTM(object):
 
                     # Write the graph to summary
                     try:
-                        writer = tf.summary.FileWriter(self.logdir, graph=tf.get_default_graph())
+                        writer = tf.summary.FileWriter(self.log_dir, graph=tf.get_default_graph())
                     except Exception as msg:
                         writer = None
                         log.exception("Exception when saving summary info: ", msg)
 
+                    self.model_saver = tf.train.Saver()
+
                     # Group all the keys into a dictionary by using kwargs
-                    self.graph_keys = dict(X=X,
-                                           y=y,
-                                           y_is=y_is,
-                                           y_oos=y_oos,
-                                           pred=pred,
-                                           pred_is=pred_is,
-                                           pred_oos=pred_oos,
-                                           keep_prob=keep_prob,
-                                           in_sample_cutoff=in_sample_cutoff,
-                                           global_step=global_step,
-                                           states=states,
-                                           outputs=outputs,
-                                           loss=loss,
-                                           loss_oos=loss_oos,
-                                           optimizer=optimizer,
-                                           pearson_corr_is=pearson_corr_is,
-                                           pearson_corr_oos=pearson_corr_oos,
-                                           adaptive_learning_rate=adaptive_learning_rate,
-                                           summary_op=summary_op,
-                                           writer=writer
-                                           )
+                    self.graph_keys = dict(
+                        X=X,
+                        y=y,
+                        y_is=y_is,
+                        y_oos=y_oos,
+                        pred=pred,
+                        pred_is=pred_is,
+                        pred_oos=pred_oos,
+                        keep_prob=keep_prob,
+                        in_sample_cutoff=in_sample_cutoff,
+                        global_step=global_step,
+                        states=states,
+                        outputs=outputs,
+                        loss=loss,
+                        loss_oos=loss_oos,
+                        optimizer=optimizer,
+                        pearson_corr_is=pearson_corr_is,
+                        pearson_corr_oos=pearson_corr_oos,
+                        adaptive_learning_rate=adaptive_learning_rate,
+                        init=init,
+                        summary_op=summary_op,
+                        writer=writer
+                    )
+
+    def train(self, data_feeder, restore_model=False, pre_trained_model=None,
+              epoch_prev=0, epoch_end=21, step=1, writer_step=1, display_step=50,
+              return_weights=False, log=None, verbose=0):
+        """Perform training of the LSTM network on specified compute device.
+        data_feeder is a generator function that feeds in a mini-batch of data
+        """
+        if log is None:
+            log = logger
+
+        if self.graph is None:
+            log.warning("No graph available for training.  Need to create compute graph first.")
+            return None
+
+        # Launch a tensorflow compute session
+        with tf.Session(graph=self.graph,
+                        config=tf.ConfigProto(allow_soft_placement=True, log_device_placement=True)) as sess:
+            # Restore latest checkpoint
+            if restore_model:
+                try:
+                    self.model_saver.restore(sess, os.path.join(self.model_dir, pre_trained_model))
+                except Exception as msg:
+                    log.exception("Session restore failed: ", msg)
+                    raise Exception
+                if self.sessid is None:
+                    self.sessid = id_generator()
+                log.info(f"[{self.sessid}] Restored pre-trained model successfully")
+                self.logging_session_parameters()
+            else:
+                epoch_prev = 0
+                sess.run(self.graph_keys['init'])
+                self.sessid = id_generator()
+                self.logging_session_parameters()
+
+            # set epoch counter
+            i = epoch_prev + 1
+
+            while i <= epoch_end:
+                log.info(f"[{self.sessid}] Epoch {i} Starts ******************************************************")
+                tic = time()
+                actual = None
+                predicted = None
+                epoch_loss = 0.0
+                for batch_X, batch_y, this_mean, this_std, in_sample_size, total_sample_size in data_feeder():
+                    # Run optimization
+                    # Note: drop is for training only
+                    for _ in range(self.inner_iteration):
+                        _, current_rate, states_val = sess.run(
+                            [
+                                self.graph_keys['optimizer'],
+                                self.graph_keys['adaptive_learning_rate'],
+                                self.graph_keys['states']
+                            ],
+                            feed_dict={
+                                self.graph_keys['X']: batch_X,
+                                self.graph_keys['y']: batch_y,
+                                self.graph_keys['keep_prob']: self.keep_prob,  # for training only
+                                self.graph_keys['in_sample_cutoff']: in_sample_size,
+                                self.graph_keys['global_step']: i / epoch_end
+                            }
+                        )
+
+                    # Obtain out of sample target variable and prediction
+                    y_val, pred_val, y_oos_val, pred_oos_val = sess.run(
+                        [
+                            self.graph_keys['y'],
+                            self.graph_keys['pred'],
+                            self.graph_keys['y_oos'],
+                            self.graph_keys['pred_oos']
+                        ],
+                        feed_dict={
+                            self.graph_keys['X']: batch_X,
+                            self.graph_keys['y']: batch_y,
+                            self.graph_keys['keep_prob']: 1.0,  # needs to be 1.0 for prediction
+                            self.graph_keys['in_sample_cutoff']: in_sample_size
+                        }
+                    )
+
+                    # reverse transform before recording the results
+                    y_val = np.array(y_val) * this_std + this_mean
+                    y_oos_val = np.array(y_oos_val) * this_std + this_mean
+                    pred_val = np.array(pred_val) * this_std + this_mean
+                    pred_oos_val = np.array(pred_oos_val) * this_std + this_mean
+
+                    # record the results
+                    if actual is None:
+                        actual = np.array(y_oos_val)
+                    else:
+                        actual = np.r_[actual, np.array(y_val)]
+
+                    if predicted is None:
+                        predicted = np.array(pred_oos_val)
+                    else:
+                        predicted = np.r_[predicted, np.array(pred_oos_val)]
+
+                    if self.all_actual is None:
+                        self.all_actual = np.array(y_oos_val)
+                    else:
+                        self.all_actual = np.r_[actual, np.array(y_val)]
+
+                    if self.all_predicted is None:
+                        self.all_predicted = np.array(pred_oos_val)
+                    else:
+                        self.all_predicted = np.r_[predicted, np.array(pred_oos_val)]
+
+                    # Calculate batch accuracy
+                    # Calculate batch loss
+                    pearson_corr_is_val, pearson_corr_oos_val, loss_val, summary = sess.run(
+                        [
+                            self.graph_keys['pearson_corr_is'],
+                            self.graph_keys['pearson_corr_oos'],
+                            self.graph_keys['loss'],
+                            self.graph_keys['summary_op']
+                        ],
+                        feed_dict={
+                            self.graph_keys['X']: batch_X,
+                            self.graph_keys['y']: batch_y,
+                            self.graph_keys['keep_prob']: 1.0,
+                            self.graph_keys['in_sample_cutoff']: in_sample_size
+                        }
+                    )
+                    pearson_corr_is_val = pearson_corr_is_val[0, 0]  # A correlation matrix
+                    pearson_corr_oos_val = pearson_corr_oos_val[0, 0]  # A correlation matrix
+
+                    self.all_corr_is.append(pearson_corr_is_val)
+                    self.all_corr_oos.append(pearson_corr_oos_val)
+                    epoch_loss += loss_val
+
+                    if return_weights:
+                        lstm_kernel_weights = self.graph.get_tensor_by_name('rnn/multi_rnn_cell/cell_0/lstm_cell/kernel:0')
+                        lstm_kernel_biases = self.graph.get_tensor_by_name('rnn/multi_rnn_cell/cell_0/lstm_cell/bias:0')
+                        fc_weights = self.graph.get_tensor_by_name('lstm/model/fc1/W/W_fc1:0')
+                        fc_biases = self.graph.get_tensor_by_name('lstm/model/fc1/b/b_fc1:0')
+                        self.lstm_kernel_weights = lstm_kernel_weights.eval()
+                        self.lstm_kernel_biases = lstm_kernel_biases.eval()
+                        self.fc_weights = fc_weights.eval()
+                        self.fc_biases = fc_biases.eval()
+
+                    # Once every display_step show some diagnostics - the loss function, in-sample correlation, etc.
+                    if step % display_step == 0:
+                        #                 print("add writer step to summary")
+                        self.graph_keys['writer'].add_summary(summary, writer_step)
+                        writer_step += 1
+                        toc = time() - tic
+                        log.info(
+                            f"[{self.sessid}] Iter:{step}, LR:{current_rate:.5f}, mbatch loss: {loss_val:.1f},, " \
+                            f"mbatch in-sample corr:{pearson_corr_is_val:7.4f}, oos corr:{pearson_corr_oos_val:7.4f} " \
+                            f"({in_sample_size}/{total_sample_size})), {toc:.1f}s elapsed."
+                        )
+                    step += 1  # finishes this id, continue to next id step
+
+                # epoch finishes
+                corr_epoch_oos = np.corrcoef(actual.reshape(-1,1), predicted.reshape(-1,1))[0, 1]
+                self.all_epochs.append(i)
+                self.all_losses_per_epoch.append(epoch_loss)
+                self.all_corr_oos_per_epoch.append(corr_epoch_oos)
+                log.info(f'[{self.sessid}] Epoch {i} total out-of-sample pearson corr: {corr_epoch_oos:8.5f}')
+                log.info(
+                    f"[{self.sessid}] Epoch {i} Ends ======================================================")
+                try:
+                    _ = self.model_saver.save(sess, os.path.join(self.model_dir, f"model_epoch_{i}.ckpt"))
+                    log.info("Model checkpoint successfully saved.")
+                except Exception as msg:
+                    log.info("Model checkpoint save unsuccessful: ", msg)
+                i += 1  # onto next epoch
+
+            results = dict(
+                all_epochs=self.all_epochs,
+                all_losses_per_epoch=self.all_losses_per_epoch,
+                all_corr_oos_per_epoch=self.all_corr_oos_per_epoch,
+                all_corr_is=self.all_corr_is,
+                all_corr_oos=self.all_corr_oos,
+                all_actual=self.all_actual,
+                all_predicted=self.all_predicted,
+            )
+
+            if return_weights:
+                results.update(
+                    dict(
+                        lstm_kernel_weights=self.lstm_kernel_weights,
+                        lstm_kernel_biases=self.lstm_kernel_biases,
+                        fc_weights=self.fc_weights,
+                        fc_biases=self.fc_biases
+                    )
+                )
+
+            return results
