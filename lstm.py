@@ -588,7 +588,7 @@ class LSTM(object):
                     step += 1  # finishes this id, continue to next id step
 
                 # epoch finishes
-                corr_epoch_oos = np.corrcoef(actual.reshape(-1,1), predicted.reshape(-1,1))[0, 1]
+                corr_epoch_oos = np.corrcoef(actual.reshape(1,-1), predicted.reshape(1,-1))[0, 1]
                 self.all_epochs.append(i)
                 self.all_losses_per_epoch.append(epoch_loss)
                 self.all_corr_oos_per_epoch.append(corr_epoch_oos)
