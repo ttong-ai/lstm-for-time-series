@@ -1,11 +1,6 @@
-# This module is for preparing the original data.
-# Original data is not clean and has also NaN values.
-# We also added hand-crafted features to boost the correlation
-# In deep learning, one of the goals is to do feature engineering automatically
-# without using any hand-crafted features. We suggest to use auto-encoders for feature engineering.
-# We left using auto-encoders as exercise.
+# -*- coding: utf-8 -*-
 
-import pandas as pd 
+import pandas as pd
 import numpy as np
 
 def createNewFeatures(df_expanded):

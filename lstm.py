@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# @author: ttong1013
+# author: ttong1013
 
 import numpy as np
 import random
@@ -369,16 +369,17 @@ class LSTM(object):
                         optimizer = tf.train.AdamOptimizer(learning_rate=adaptive_learning_rate).minimize(loss)
 
                     with tf.name_scope('summary'):
-                        tf.summary.scalar("pearson_corr_is", pearson_corr_is)
-                        tf.summary.scalar("pearson_corr_oos", pearson_corr_oos)
+                        tf.summary.tensor_summary("pearson_corr_is", pearson_corr_is)
+                        tf.summary.tensor_summary("pearson_corr_oos", pearson_corr_oos)
                         tf.summary.scalar("loss", loss)
-                        tf.summary.scalar("validation loss", loss_oos)
+                        tf.summary.scalar("validation_loss", loss_oos)
                         summary_op = tf.summary.merge_all()
 
                     # Write the graph to summary
                     try:
                         writer = tf.summary.FileWriter(self.logdir, graph=tf.get_default_graph())
                     except Exception as msg:
+                        writer = None
                         log.exception("Exception when saving summary info: ", msg)
 
                     # Group all the keys into a dictionary by using kwargs
