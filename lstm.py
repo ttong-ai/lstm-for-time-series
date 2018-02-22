@@ -79,7 +79,8 @@ class LSTM(object):
                  n_states=50, n_layers=1, n_time_steps=10,
                  activation=tf.nn.relu, keep_prob=0.5, l1_reg=1e-2, l2_reg=1e-3,
                  start_learning_rate=0.001, decay_steps=1, decay_rate=0.3,
-                 iter_per_id=10, forward_step=1, create_graph=True, scope='lstm'):
+                 iter_per_id=10, forward_step=1, create_graph=True,
+                 scope='lstm', logdir='logs'):
         self.n_input_features = n_input_features
         self.n_output_features = n_output_features
         self.batch_size = batch_size
@@ -101,6 +102,7 @@ class LSTM(object):
         self.graph_keys = None
         self.graph_ready = False
         self.scope = scope
+        self.logdir = logdir
 
         # Locate available computing devices and save in self.device_list
         self.device_list = self.find_compute_devices()
@@ -186,15 +188,19 @@ class LSTM(object):
         show_graph(self.graph.as_graph_def(), max_const_size)
 
     @staticmethod
-    def get_tf_normal_variable(shape, mean=0.0, stddev=0.6):
-        return tf.Variable(tf.truncated_normal(shape, mean=mean, stddev=stddev), validate_shape=False)
+    def get_tf_normal_variable(shape, mean=0.0, stddev=0.6, name=None):
+        return tf.Variable(tf.truncated_normal(shape, mean=mean, stddev=stddev),
+                           validate_shape=False, name=name)
 
-    def create_lstm_graph(self, n_input_features=None, reset_graph=True, verbose=0):
+    def create_lstm_graph(self, n_input_features=None, reset_graph=True, log=None, verbose=0):
         """Build the Tensorflow based LSTM network
         Input::
         n_input_features: number of input features, there is no default value and has to be provided.
         Return::  tensor references that need to be referenced later
         """
+        if log is None:
+            log = logger
+
         if n_input_features is None:
             assert self.n_input_features is not None
         else:
@@ -219,12 +225,12 @@ class LSTM(object):
                             # [None, n_time_steps, n_input_features]
                             # n_input_features should include all the inputs flattened into a vector
                             X = tf.placeholder(tf.float32, shape=[self.batch_size, self.n_time_steps,
-                                                                  self.n_input_features])
+                                                                  self.n_input_features], name='X')
 
                     with tf.name_scope('hyperparameters'):
                         with tf.name_scope('keep_prob'):
                             # Define keep_prob placeholder for dropout
-                            keep_prob = tf.placeholder(tf.float32)
+                            keep_prob = tf.placeholder(tf.float32, name='keep_prob')
 
                         with tf.name_scope('in_sample_cutoff'):
                             # Split point between training and test
@@ -268,43 +274,66 @@ class LSTM(object):
                         # the variable to be predicted
                         with tf.name_scope('fc1'):
                             with tf.name_scope('W'):
-                                W_fc1 = self.get_tf_normal_variable([self.n_states, self.n_output_features])
+                                W_fc1 = self.get_tf_normal_variable([self.n_states, self.n_output_features],
+                                                                    name='W_fc1')
                             with tf.name_scope('b'):
-                                b_fc1 = self.get_tf_normal_variable([self.n_output_features])
+                                b_fc1 = self.get_tf_normal_variable([self.n_output_features], name='b_fc1')
                             with tf.name_scope('pred'):
                                 # states[-1][1] is the h states of the last layer cell
-                                pred = tf.matmul(states[-1][1], W_fc1) + b_fc1
+                                pred = tf.matmul(states[-1][1], W_fc1) + b_fc1  # [None, n_output_features]
 
                     # Placeholder for the output (label)
                     with tf.name_scope('label'):
-                        y = tf.placeholder(tf.float32, shape=[self.batch_size, 1], name='y_label')
+                        # y has shape [None, n_output_features]
+                        y = tf.placeholder(tf.float32, shape=[self.batch_size, self.n_output_features], name='y_label')
                         # this is important - we only want to train on the in-sample set of rows using TensorFlow
-                        y_is = y[0:in_sample_cutoff]
-                        pred_is = pred[0:in_sample_cutoff]
+                        y_is = y[0:in_sample_cutoff, :]
+                        pred_is = pred[0:in_sample_cutoff, :]
                         # also extract out of sample predictions and actual values,
                         # we'll use them for evaluation while training the model.
-                        y_oos = y[in_sample_cutoff:]
-                        pred_oos = pred[in_sample_cutoff:]
+                        y_oos = y[in_sample_cutoff:, :]
+                        pred_oos = pred[in_sample_cutoff:, :]
 
                     with tf.name_scope('stats'):
-                        # Pearson correlation to evaluate the model, all using in-sample training data
-                        covariance = tf.reduce_sum(
-                            tf.matmul(
-                                tf.transpose(tf.subtract(pred_is, tf.reduce_mean(pred_is))),
-                                tf.subtract(y_is, tf.reduce_mean(y_is))
-                            )
+                        # Pearson correlation to evaluate the model, here is for in-sample training data
+                        covariance_is = tf.matmul(
+                            tf.transpose(tf.subtract(pred_is, tf.reduce_mean(pred_is, axis=0, keepdims=True))),
+                            tf.subtract(y_is, tf.reduce_mean(y_is, axis=0, keepdims=True))
+                        )  # covariance matrix, shape [n_output_features, n_output_features]
+                        var_pred_is = tf.reduce_sum(
+                            tf.square(tf.subtract(pred_is, tf.reduce_mean(pred_is))), axis=0, keepdims=True
+                        )  # variance of pred_is, shape [1, n_output_features]
+                        var_y_is = tf.reduce_sum(
+                            tf.square(tf.subtract(y_is, tf.reduce_mean(y_is))), axis=0, keepdims=True
+                        )  # variance of y_is, shape [1, n_output_features]
+                        # pearson correlation matrix, shape [n_output_features, n_output_features]
+                        pearson_corr_is = tf.div(
+                            covariance_is, tf.sqrt(tf.matmul(tf.transpose(var_pred_is), var_y_is)),
+                            name='pearson_corr_is'
                         )
-                        var_pred = tf.reduce_sum(
-                            tf.square(tf.subtract(pred_is, tf.reduce_mean(pred_is)))
+
+                        # Pearson correlation for out-of-sample data
+                        covariance_oos = tf.matmul(
+                            tf.transpose(tf.subtract(pred_oos, tf.reduce_mean(pred_oos, axis=0, keepdims=True))),
+                            tf.subtract(y_oos, tf.reduce_mean(y_oos, axis=0, keepdims=True))
+                        )  # covariance matrix, shape [n_output_features, n_output_features]
+                        var_pred_oos = tf.reduce_sum(
+                            tf.square(tf.subtract(pred_oos, tf.reduce_mean(pred_oos))), axis=0, keepdims=True
+                        )  # variance of pred_oos, shape [1, n_output_features]
+                        var_y_oos = tf.reduce_sum(
+                            tf.square(tf.subtract(y_oos, tf.reduce_mean(y_oos))), axis=0, keepdims=True
+                        )  # variance of y_oos, shape [1, n_output_features]
+                        # pearson correlation matrix, shape [n_output_features, n_output_features]
+                        pearson_corr_oos = tf.div(
+                            covariance_oos, tf.sqrt(tf.matmul(tf.transpose(var_pred_oos), var_y_oos)),
+                            name='pearson_corr_oos'
                         )
-                        var_y = tf.reduce_sum(tf.square(tf.subtract(y_is, tf.reduce_mean(y_is))))
-                        pearson_corr = covariance / tf.sqrt(var_pred * var_y)
 
                     with tf.name_scope('hyperparameters'):
                         # set up adaptive learning rate:
                         # Ratio of global_step / decay_steps is designed to indicate how far we've progressed in training.
                         # the ratio is 0 at the beginning of training and is 1 at the end.
-                        global_step = tf.placeholder(tf.float32)
+                        global_step = tf.placeholder(tf.float32, name='global_step')
 
                         # tf.train.exponetial_decay is calculated as:
                         #     decayed_learning_rate = learning_rate * decay_rate ^ (global_step / decay_steps)
@@ -321,25 +350,36 @@ class LSTM(object):
                     # Define loss and optimizer
                     # Note the loss only involves in-sample rows
                     # Regularization is added in the loss function to avoid over-fitting
-                    lstm_variables = [v for v in tf.trainable_variables()
-                                                      if v.name.startswith('rnn')]
+                    # lstm_variables = [v for v in tf.trainable_variables()
+                    #                                   if v.name.startswith('rnn')]
 
                     with tf.name_scope('loss'):
+                        # this the loss function for optimization purpose
                         loss = tf.nn.l2_loss(tf.subtract(y_is, pred_is)) + \
                                tf.contrib.layers.apply_regularization(
-                                   tf.contrib.layers.l1_l2_regularizer(scale_l1=self.l1_reg_scale, scale_l2=self.l2_reg_scale),
-                                   tf.trainable_variables())
+                                   tf.contrib.layers.l1_l2_regularizer(scale_l1=self.l1_reg_scale,
+                                                                       scale_l2=self.l2_reg_scale),
+                                   tf.trainable_variables()
+                               )
+
+                        # this is the out-of-sample L2 loss, only for observation, never use for optimization
+                        loss_oos = tf.nn.l2_loss(tf.subtract(y_oos, pred_oos))
 
                     with tf.name_scope('optimizer'):
                         optimizer = tf.train.AdamOptimizer(learning_rate=adaptive_learning_rate).minimize(loss)
 
                     with tf.name_scope('summary'):
-                        tf.summary.scalar("pearson_corr", pearson_corr)
+                        tf.summary.scalar("pearson_corr_is", pearson_corr_is)
+                        tf.summary.scalar("pearson_corr_oos", pearson_corr_oos)
                         tf.summary.scalar("loss", loss)
+                        tf.summary.scalar("validation loss", loss_oos)
                         summary_op = tf.summary.merge_all()
 
                     # Write the graph to summary
-                    writer = tf.summary.FileWriter("logs", graph=tf.get_default_graph())
+                    try:
+                        writer = tf.summary.FileWriter(self.logdir, graph=tf.get_default_graph())
+                    except Exception as msg:
+                        log.exception("Exception when saving summary info: ", msg)
 
                     # Group all the keys into a dictionary by using kwargs
                     self.graph_keys = dict(X=X,
@@ -355,8 +395,10 @@ class LSTM(object):
                                            states=states,
                                            outputs=outputs,
                                            loss=loss,
+                                           loss_oos=loss_oos,
                                            optimizer=optimizer,
-                                           pearson_corr=pearson_corr,
+                                           pearson_corr_is=pearson_corr_is,
+                                           pearson_corr_oos=pearson_corr_oos,
                                            adaptive_learning_rate=adaptive_learning_rate,
                                            summary_op=summary_op,
                                            writer=writer
