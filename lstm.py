@@ -142,6 +142,7 @@ class LSTM(object):
                 print("Exception message: ", msg)
                 self.graph_ready = False
 
+
     def __call__(self, n_input_features=None, n_output_features=1, batch_size=None,
                  n_states=50, n_layers=1, n_time_steps=10,
                  activation=tf.nn.relu, keep_prob=0.5, l1_reg=1e-2, l2_reg=1e-3,
@@ -159,6 +160,7 @@ class LSTM(object):
                       start_learning_rate=start_learning_rate, decay_steps=decay_steps, decay_rate=decay_rate,
                       inner_iteration=iter_per_id, forward_step=forward_step, create_graph=create_graph,
                       scope=scope, log_dir=log_dir, model_dir=model_dir)
+
 
     def logging_session_parameters(self, log=None):
         if log is None:
@@ -178,6 +180,7 @@ class LSTM(object):
         log.info(f"[{self.sessid}] Inner iteration per id: {self.inner_iteration}")
         log.info(f"[{self.sessid}] Forward prediction period: {self.forward_step}")
 
+
     @staticmethod
     def find_compute_devices():
         device_list = device_lib.list_local_devices()
@@ -190,10 +193,12 @@ class LSTM(object):
         assert len(cpu) >= 1  # assert at least cpu resource is available
         return dict({'gpu': gpu, 'cpu': cpu})
 
+
     def show_compute_devices(self):
         if self.compute_device is None:
             self.device_list = self.find_compute_devices()
         print("Following compute devices available\n  ", self.device_list)
+
 
     def set_compute_device(self, type='gpu', seq=0):
         try:
@@ -203,12 +208,15 @@ class LSTM(object):
                   "Please use show_compute_devices() to list available compute devices.")
             self.compute_device = self.device_list['cpu'][0]  # default to cpu as computing device
 
+
     def reset_graph(self):
         del self.graph
         self.graph = tf.Graph()
 
+
     def show_graph(self, max_const_size=32):
         show_graph(self.graph.as_graph_def(), max_const_size)
+
 
     @staticmethod
     def get_tf_normal_variable(shape, mean=0.0, stddev=0.6, name=None):
@@ -452,7 +460,8 @@ class LSTM(object):
         If both are provided, the direct data will take precedence over data_feeder.
 
         Model persistence:
-            Model persistence is also built into the class.  As long as model_saver and model_dir have been
+            Model persistence is also built into the class.  As long as model_saver and model_dir are
+            properly setup, they
 
         Return: A compiled dictionary of various outputs from training.
         """
