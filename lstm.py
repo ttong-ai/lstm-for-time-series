@@ -478,6 +478,12 @@ class LSTM:
             log.warning("No graph available for training.  Need to create compute graph first.")
             return None
 
+        # If batch data are specifically provided, it will take priority over data_feeder
+        if batch_X is not None and batch_y is not None and in_sample_size is not None \
+                and y_is_mean is not None and y_is_std is not None:
+            def data_feeder():
+                return [(batch_X, batch_y, y_is_mean, y_is_std, in_sample_size, total_sample_size)]
+
         # Launch a tensorflow compute session
         with tf.Session(graph=self.graph,
                         config=tf.ConfigProto(allow_soft_placement=True, log_device_placement=True)) as sess:
@@ -508,19 +514,11 @@ class LSTM:
                 predicted = None
                 epoch_loss = 0.0
 
-                # If batch data are specifically provided, it will take priority over data_feeder
-                if batch_X is not None and batch_y is not None and in_sample_size is not None\
-                        and y_is_mean is not None and y_is_std is not None:
-                    def data_feeder():
-                        return [(batch_X, batch_y, y_is_mean, y_is_std, in_sample_size, total_sample_size)]
-
                 for batch_X, batch_y, y_is_mean, y_is_std, in_sample_size, total_sample_size in data_feeder():
                     # Run optimization
                     # Note: dropout is intended for training only
 
                     for _ in range(self.inner_iteration):
-                        if verbose >= 2:
-                            print(self.inner_iteration)
                         _, current_rate, states_val = sess.run(
                             [
                                 self.graph_keys['optimizer'],
@@ -551,10 +549,14 @@ class LSTM:
                             self.graph_keys['in_sample_cutoff']: in_sample_size
                         }
                     )
+                    assert (y_val[in_sample_size:] == y_oos_val).all()
+                    assert (pred_val[in_sample_size:] == pred_oos_val).all()
+
                     if verbose >= 2:
-                        print(y_val, pred_val, y_oos_val, pred_oos_val)
+                        pass
 
                     # reverse transform before recording the results
+                    # if no reverse transform is desired inside training, use default y_is_mean=0.0 and y_is_std=1.0
                     y_val = np.array(y_val) * y_is_std + y_is_mean
                     y_oos_val = np.array(y_oos_val) * y_is_std + y_is_mean
                     pred_val = np.array(pred_val) * y_is_std + y_is_mean
@@ -564,7 +566,7 @@ class LSTM:
                     if actual is None:
                         actual = np.array(y_oos_val)
                     else:
-                        actual = np.r_[actual, np.array(y_val)]
+                        actual = np.r_[actual, np.array(y_oos_val)]
 
                     if predicted is None:
                         predicted = np.array(pred_oos_val)
@@ -574,7 +576,7 @@ class LSTM:
                     if self.all_actual is None:
                         self.all_actual = np.array(y_oos_val)
                     else:
-                        self.all_actual = np.r_[actual, np.array(y_val)]
+                        self.all_actual = np.r_[actual, np.array(y_oos_val)]
 
                     if self.all_predicted is None:
                         self.all_predicted = np.array(pred_oos_val)
@@ -606,8 +608,8 @@ class LSTM:
                     if return_weights:
                         lstm_kernel_weights = self.graph.get_tensor_by_name('rnn/multi_rnn_cell/cell_0/lstm_cell/kernel:0')
                         lstm_kernel_biases = self.graph.get_tensor_by_name('rnn/multi_rnn_cell/cell_0/lstm_cell/bias:0')
-                        fc_weights = self.graph.get_tensor_by_name('lstm/model/fc1/W/W_fc1:0')
-                        fc_biases = self.graph.get_tensor_by_name('lstm/model/fc1/b/b_fc1:0')
+                        fc_weights = self.graph.get_tensor_by_name('/'.join([self.scope, 'model/fc1/W/W_fc1:0']))
+                        fc_biases = self.graph.get_tensor_by_name('/'.join([self.scope, 'model/fc1/b/b_fc1:0']))
                         self.lstm_kernel_weights = lstm_kernel_weights.eval()
                         self.lstm_kernel_biases = lstm_kernel_biases.eval()
                         self.fc_weights = fc_weights.eval()
@@ -627,6 +629,10 @@ class LSTM:
                     step += 1  # finishes this id, continue to next id step
 
                 # epoch finishes
+                if verbose >= 2:
+                    print("actual shape: ", actual.shape)
+                    print("predicted shape: ", predicted.shape)
+
                 corr_epoch_oos = np.corrcoef(actual.reshape(1, -1), predicted.reshape(1, -1))[0, 1]
                 if verbose >= 2:
                     print(corr_epoch_oos)
