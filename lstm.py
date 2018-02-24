@@ -67,6 +67,7 @@ def show_graph(graph_def=None, max_const_size=32):
     iframe = """
         <iframe seamless style="width:1200px;height:620px;border:0" srcdoc="{}"></iframe>
     """.format(code.replace('"', '&quot;'))
+    # This will display the graph inside the jupyter notebook
     display(HTML(iframe))
 
 
@@ -74,12 +75,12 @@ def id_generator(size=6, chars=string.ascii_uppercase + string.digits):
     return ''.join(random.choice(chars) for _ in range(size))
 
 
-class LSTM(object):
+class LSTM:
     """Container for multi-time-step and multi-layered LSTM framework"""
     global logger
 
     def __init__(self, n_input_features=None, n_output_features=1, batch_size=None,
-                 n_states=50, n_layers=1, n_time_steps=10,
+                 cell_type='LSTM', n_states=50, n_layers=1, n_time_steps=10,
                  activation=tf.nn.relu, keep_prob=0.5, l1_reg=1e-2, l2_reg=1e-3,
                  start_learning_rate=0.001, decay_steps=1, decay_rate=0.3,
                  inner_iteration=10, forward_step=1, create_graph=True,
@@ -87,6 +88,7 @@ class LSTM(object):
         self.n_input_features = n_input_features
         self.n_output_features = n_output_features
         self.batch_size = batch_size
+        self.cell_type = cell_type
         self.n_states = n_states
         self.n_layers = n_layers
         self.n_time_steps = n_time_steps
@@ -131,7 +133,7 @@ class LSTM(object):
             print(msg)
             self.compute_device = self.device_list['cpu'][0]  # default to cpu as computing device
 
-        # If create_graph is set to True, then create the graph.
+        # If create_graph is set to True, then create the graph directly during the initiation.
         # You can always reset_graph and recreate new ones later.
         if create_graph:
             try:
@@ -143,7 +145,7 @@ class LSTM(object):
                 self.graph_ready = False
 
     def __call__(self, n_input_features=None, n_output_features=1, batch_size=None,
-                 n_states=50, n_layers=1, n_time_steps=10,
+                 cell_type='LSTM', n_states=50, n_layers=1, n_time_steps=10,
                  activation=tf.nn.relu, keep_prob=0.5, l1_reg=1e-2, l2_reg=1e-3,
                  start_learning_rate=0.001, decay_steps=1, decay_rate=0.3,
                  iter_per_id=10, forward_step=1, create_graph=True,
@@ -154,7 +156,7 @@ class LSTM(object):
             del self.graph
 
         self.__init__(n_input_features=n_input_features, n_output_features=n_output_features, batch_size=batch_size,
-                      n_states=n_states, n_layers=n_layers, n_time_steps=n_time_steps,
+                      cell_type=cell_type, n_states=n_states, n_layers=n_layers, n_time_steps=n_time_steps,
                       activation=activation, keep_prob=keep_prob, l1_reg=l1_reg, l2_reg=l2_reg,
                       start_learning_rate=start_learning_rate, decay_steps=decay_steps, decay_rate=decay_rate,
                       inner_iteration=iter_per_id, forward_step=forward_step, create_graph=create_graph,
@@ -180,6 +182,11 @@ class LSTM(object):
 
     @staticmethod
     def find_compute_devices():
+        """Find available compute devices (gpu's and cpu's) on the local node and store them as a dictionary.
+        Note:
+            Tensorflow lumps all available cpu cores together as a single cpu resource.  GPU devices will be
+            separate.
+        """
         device_list = device_lib.list_local_devices()
         gpu, cpu = [], []
         for device in device_list:
@@ -188,14 +195,19 @@ class LSTM(object):
             if device.name.find('CPU') != -1:
                 cpu.append(device.name)
         assert len(cpu) >= 1  # assert at least cpu resource is available
-        return dict({'gpu': gpu, 'cpu': cpu})
+        return dict(gpu=gpu, cpu=cpu)
 
     def show_compute_devices(self):
+        """Show available compute devices on the local node"""
         if self.compute_device is None:
             self.device_list = self.find_compute_devices()
         print("Following compute devices available\n  ", self.device_list)
 
     def set_compute_device(self, type='gpu', seq=0):
+        """Set compute device for this tensorflow graph.
+        Currently, the entire graph needs to stay in one device.  In the future, distributed graph across GPU's
+        will be attempted.
+        """
         try:
             self.compute_device = self.device_list[type][seq]
         except (KeyError, IndexError) as msg:
@@ -204,17 +216,21 @@ class LSTM(object):
             self.compute_device = self.device_list['cpu'][0]  # default to cpu as computing device
 
     def reset_graph(self):
+        """Reset existing tensorflow graph and create an empty tf.Graph() object"""
         del self.graph
         self.graph = tf.Graph()
 
     def show_graph(self, max_const_size=32):
+        """Show existing tensorflow graph inside jupyter notebook"""
         show_graph(self.graph.as_graph_def(), max_const_size)
 
     @staticmethod
     def get_tf_normal_variable(shape, mean=0.0, stddev=0.6, name=None):
+        """Obtain a tf.Variable with desired shape and to be initialized with truncated normal
+        distribution.
+        """
         return tf.Variable(tf.truncated_normal(shape, mean=mean, stddev=stddev),
                            validate_shape=False, name=name)
-
 
     def create_lstm_graph(self, n_input_features=None, reset_graph=True, log=None, verbose=0):
         """Build the Tensorflow based LSTM network
@@ -439,8 +455,7 @@ class LSTM(object):
                         writer=writer
                     )
 
-
-    def train(self, batch_X=None, batch_y=None, in_sample_size=None, data_feeder=None,
+    def train(self, batch_X=None, batch_y=None, in_sample_size=None, y_is_mean=0.0, y_is_std=1.0, data_feeder=None,
               restore_model=False, pre_trained_model=None, epoch_prev=0, epoch_end=21,
               step=1, writer_step=1, display_step=50, return_weights=False, log=None, verbose=0):
         """Perform training of the LSTM network on specified compute device.
@@ -492,10 +507,20 @@ class LSTM(object):
                 actual = None
                 predicted = None
                 epoch_loss = 0.0
-                for batch_X, batch_y, this_mean, this_std, in_sample_size, total_sample_size in data_feeder():
+
+                # If batch data are specifically provided, it will take priority over data_feeder
+                if batch_X is not None and batch_y is not None and in_sample_size is not None\
+                        and y_is_mean is not None and y_is_std is not None:
+                    def data_feeder():
+                        return [(batch_X, batch_y, y_is_mean, y_is_std, in_sample_size, total_sample_size)]
+
+                for batch_X, batch_y, y_is_mean, y_is_std, in_sample_size, total_sample_size in data_feeder():
                     # Run optimization
-                    # Note: drop is for training only
+                    # Note: dropout is intended for training only
+
                     for _ in range(self.inner_iteration):
+                        if verbose >= 2:
+                            print(self.inner_iteration)
                         _, current_rate, states_val = sess.run(
                             [
                                 self.graph_keys['optimizer'],
@@ -526,12 +551,14 @@ class LSTM(object):
                             self.graph_keys['in_sample_cutoff']: in_sample_size
                         }
                     )
+                    if verbose >= 2:
+                        print(y_val, pred_val, y_oos_val, pred_oos_val)
 
                     # reverse transform before recording the results
-                    y_val = np.array(y_val) * this_std + this_mean
-                    y_oos_val = np.array(y_oos_val) * this_std + this_mean
-                    pred_val = np.array(pred_val) * this_std + this_mean
-                    pred_oos_val = np.array(pred_oos_val) * this_std + this_mean
+                    y_val = np.array(y_val) * y_is_std + y_is_mean
+                    y_oos_val = np.array(y_oos_val) * y_is_std + y_is_mean
+                    pred_val = np.array(pred_val) * y_is_std + y_is_mean
+                    pred_oos_val = np.array(pred_oos_val) * y_is_std + y_is_mean
 
                     # record the results
                     if actual is None:
@@ -554,8 +581,7 @@ class LSTM(object):
                     else:
                         self.all_predicted = np.r_[predicted, np.array(pred_oos_val)]
 
-                    # Calculate batch accuracy
-                    # Calculate batch loss
+                    # Calculate batch correlation, loss, and summary
                     pearson_corr_is_val, pearson_corr_oos_val, loss_val, summary = sess.run(
                         [
                             self.graph_keys['pearson_corr_is'],
@@ -570,8 +596,8 @@ class LSTM(object):
                             self.graph_keys['in_sample_cutoff']: in_sample_size
                         }
                     )
-                    pearson_corr_is_val = pearson_corr_is_val[0, 0]  # A correlation matrix
-                    pearson_corr_oos_val = pearson_corr_oos_val[0, 0]  # A correlation matrix
+                    pearson_corr_is_val = pearson_corr_is_val[0, 0]  # Taking the corr of first output only
+                    pearson_corr_oos_val = pearson_corr_oos_val[0, 0]  # Taking the corr of the first output only
 
                     self.all_corr_is.append(pearson_corr_is_val)
                     self.all_corr_oos.append(pearson_corr_oos_val)
@@ -601,7 +627,10 @@ class LSTM(object):
                     step += 1  # finishes this id, continue to next id step
 
                 # epoch finishes
-                corr_epoch_oos = np.corrcoef(actual.reshape(1,-1), predicted.reshape(1,-1))[0, 1]
+                corr_epoch_oos = np.corrcoef(actual.reshape(1, -1), predicted.reshape(1, -1))[0, 1]
+                if verbose >= 2:
+                    print(corr_epoch_oos)
+
                 self.all_epochs.append(i)
                 self.all_losses_per_epoch.append(epoch_loss)
                 self.all_corr_oos_per_epoch.append(corr_epoch_oos)
@@ -634,5 +663,4 @@ class LSTM(object):
                         fc_biases=self.fc_biases
                     )
                 )
-
             return results
