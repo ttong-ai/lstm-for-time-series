@@ -114,8 +114,10 @@ class LSTM:
         self.model_dir = model_dir
 
         # results holder
-        self.all_actual = None
-        self.all_predicted = None
+        self.all_actual_is = None
+        self.all_actual_oos = None
+        self.all_predicted_is = None
+        self.all_predicted_oos = None
         self.all_epochs = []
         self.all_losses_per_epoch = []
         self.all_corr_oos_per_epoch = []
@@ -539,8 +541,8 @@ class LSTM:
             while i <= epoch_end:
                 log.info(f"[{self.sessid}] Epoch {i} Starts ******************************************************")
                 tic = time()
-                actual = None
-                predicted = None
+                actual_oos = None
+                predicted_oos = None
                 epoch_loss = 0.0
 
                 for batch_X, batch_y, y_is_mean, y_is_std, in_sample_size, total_sample_size in data_feeder():
@@ -578,8 +580,8 @@ class LSTM:
                             self.graph_keys['in_sample_cutoff']: in_sample_size
                         }
                     )
-                    assert (y_val[in_sample_size:] == y_oos_val).all()
-                    assert (pred_val[in_sample_size:] == pred_oos_val).all()
+                    assert (y_val[in_sample_size:, ] == y_oos_val).all()
+                    assert (pred_val[in_sample_size:, ] == pred_oos_val).all()
 
                     # reverse transform before recording the results
                     # if no reverse transform is desired inside training, use default y_is_mean=0.0 and y_is_std=1.0
@@ -589,25 +591,35 @@ class LSTM:
                     pred_oos_val = np.array(pred_oos_val) * y_is_std + y_is_mean
 
                     # record the results
-                    if actual is None:
-                        actual = np.array(y_oos_val)
+                    if actual_oos is None:
+                        actual_oos = np.array(y_oos_val)
                     else:
-                        actual = np.r_[actual, np.array(y_oos_val)]
+                        actual_oos = np.r_[actual_oos, np.array(y_oos_val)]
 
-                    if predicted is None:
-                        predicted = np.array(pred_oos_val)
+                    if predicted_oos is None:
+                        predicted_oos = np.array(pred_oos_val)
                     else:
-                        predicted = np.r_[predicted, np.array(pred_oos_val)]
+                        predicted_oos = np.r_[predicted_oos, np.array(pred_oos_val)]
 
-                    if self.all_actual is None:
-                        self.all_actual = np.array(y_oos_val)
+                    if self.all_actual_is is None:
+                        self.all_actual_is = np.array(y_val[0:in_sample_size, :])
                     else:
-                        self.all_actual = np.r_[actual, np.array(y_oos_val)]
+                        self.all_actual_is = np.r_[self.all_actual_is, np.array(y_val[0:in_sample_size, :])]
 
-                    if self.all_predicted is None:
-                        self.all_predicted = np.array(pred_oos_val)
+                    if self.all_actual_oos is None:
+                        self.all_actual_oos = np.array(y_oos_val)
                     else:
-                        self.all_predicted = np.r_[predicted, np.array(pred_oos_val)]
+                        self.all_actual_oos = np.r_[self.all_actual_oos, np.array(y_oos_val)]
+
+                    if self.all_predicted_is is None:
+                        self.all_predicted_is = np.array(pred_val[0:in_sample_size, :])
+                    else:
+                        self.all_predicted_is = np.r_[self.all_predicted_is, np.array(pred_val[0:in_sample_size, :])]
+
+                    if self.all_predicted_oos is None:
+                        self.all_predicted_oos = np.array(pred_oos_val)
+                    else:
+                        self.all_predicted_oos = np.r_[self.all_predicted_oos, np.array(pred_oos_val)]
 
                     # Calculate batch correlation, loss, and summary
                     pearson_corr_is_val, pearson_corr_oos_val, loss_val, summary = sess.run(
@@ -697,10 +709,10 @@ class LSTM:
 
                 # epoch finishes
                 if verbose >= 2:
-                    print("actual shape: ", actual.shape)
-                    print("predicted shape: ", predicted.shape)
+                    print("actual shape: ", actual_oos.shape)
+                    print("predicted shape: ", predicted_oos.shape)
 
-                corr_epoch_oos = np.corrcoef(actual.reshape(1, -1), predicted.reshape(1, -1))[0, 1]
+                corr_epoch_oos = np.corrcoef(actual_oos.reshape(1, -1), predicted_oos.reshape(1, -1))[0, 1]
                 if verbose >= 2:
                     print(corr_epoch_oos)
 
@@ -724,8 +736,10 @@ class LSTM:
                 all_corr_oos_per_epoch=self.all_corr_oos_per_epoch,
                 all_corr_is=self.all_corr_is,
                 all_corr_oos=self.all_corr_oos,
-                all_actual=self.all_actual,
-                all_predicted=self.all_predicted,
+                all_actual_is=self.all_actual_is,
+                all_actual_oos=self.all_actual_oos,
+                all_predicted_is=self.all_predicted_is,
+                all_predicted_oos=self.all_predicted_oos
             )
 
             if return_weights:
