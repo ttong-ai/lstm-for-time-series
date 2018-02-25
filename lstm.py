@@ -487,10 +487,11 @@ class LSTM:
                         summary_op=summary_op,
                         writer=writer
                     )
+    # end create_lstm_graph
 
     def train(self, batch_X=None, batch_y=None, in_sample_size=None, y_is_mean=0.0, y_is_std=1.0, data_feeder=None,
-              restore_model=False, pre_trained_model=None, epoch_prev=0, epoch_end=21,
-              step=1, writer_step=1, display_step=50, return_weights=False, log=None, verbose=0):
+              restore_model=False, pre_trained_model=None, epoch_prev=0, epoch_end=21, inner_iteration=None,
+              step=1, writer_step=1, display_step=50, return_weights=False, log=None, mode='train', verbose=0):
         """Perform training of the LSTM network on specified compute device.
         There are two ways of feeding in data:
 
@@ -553,7 +554,11 @@ class LSTM:
                     total_sample_size = batch_X.shape[0]
                     assert in_sample_size <= total_sample_size, "in_sample_size needs to be smaller than total"
 
-                    for _ in range(self.inner_iteration):
+                    # if inner_iteration is passed in, then it takes priority over internal state
+                    if inner_iteration is None:
+                        inner_iteration = self.inner_iteration
+
+                    for _ in range(inner_iteration):
                         _, current_rate, states_val = sess.run(
                             [
                                 self.graph_keys['optimizer'],
@@ -747,6 +752,61 @@ class LSTM:
                     )
                 )
             return results
+    # end train
+
+    def predict(self, batch_X=None, data_feeder=None, restore_model=False, pre_trained_model=None, log=None):
+        """Use trained model or restore from pre-trained model to predict
+        Note: if a generator is passed in, the tensorflow Session will hold resources active until iterating
+        through the entire iterable dataset.
+        Return/Yield: predicted values
+        """
+        if log is None:
+            log = logger
+
+        if self.graph is None:
+            log.warning("No graph available for prediction.  Need to have a compute graph trained weights or "
+                        "to be loaded from pre-trained saved model.")
+            return None
+
+        # If batch data are specifically provided, it will take priority over data_feeder
+        if batch_X is not None:
+            def data_feeder():
+                return [batch_X]
+
+        # Launch a tensorflow compute session
+        with tf.Session(graph=self.graph,
+                        config=tf.ConfigProto(allow_soft_placement=True, log_device_placement=True)) as sess:
+            # Restore latest checkpoint
+            if restore_model:
+                try:
+                    self.model_saver.restore(sess, os.path.join(self.model_dir, pre_trained_model))
+                except Exception as msg:
+                    log.exception("Session restore failed: ", msg)
+                    raise Exception
+                if self.sessid is None:
+                    self.sessid = id_generator()
+                log.info(f"[{self.sessid}] Restored pre-trained model successfully")
+            else:
+                if self.sessid is None:
+                    self.sessid = id_generator()
+            self.logging_session_parameters()
+
+            for batch_X in data_feeder():
+                total_sample_size = batch_X.shape[0]
+                # Obtain out of sample target variable and prediction
+                pred_val = sess.run(
+                    [
+                        self.graph_keys['pred'],
+                    ],
+                    feed_dict={
+                        self.graph_keys['X']: batch_X,
+                        self.graph_keys['keep_prob']: 1.0,  # needs to be 1.0 for prediction
+                        self.graph_keys['in_sample_cutoff']: total_sample_size
+                    }
+                )
+                # log.info(f'[{self.sessid}] Prediction run successful.')
+                yield pred_val
+    # end predict
 
 
 # using tf.nn.rnn_cell.GRUCell
