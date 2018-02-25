@@ -431,8 +431,10 @@ class LSTM:
                         # this the loss function for optimization purpose
                         loss = tf.nn.l2_loss(tf.subtract(y_is, pred_is)) + \
                                tf.contrib.layers.apply_regularization(
-                                   tf.contrib.layers.l1_l2_regularizer(scale_l1=self.l1_reg_scale,
-                                                                       scale_l2=self.l2_reg_scale),
+                                   tf.contrib.layers.l1_l2_regularizer(
+                                       scale_l1=self.l1_reg_scale,
+                                       scale_l2=self.l2_reg_scale
+                                   ),
                                    tf.trainable_variables()
                                )
 
@@ -545,9 +547,11 @@ class LSTM:
                 predicted_oos = None
                 loss_epoch = 0.0
 
-                for batch_X, batch_y, y_is_mean, y_is_std, in_sample_size, total_sample_size in data_feeder():
+                for batch_X, batch_y, y_is_mean, y_is_std, in_sample_size in data_feeder():
                     # Run optimization
                     # Note: dropout is intended for training only
+                    total_sample_size = batch_X.shape[0]
+                    assert in_sample_size <= total_sample_size, "in_sample_size needs to be smaller than total"
 
                     for _ in range(self.inner_iteration):
                         _, current_rate, states_val = sess.run(
@@ -566,12 +570,17 @@ class LSTM:
                         )
 
                     # Obtain out of sample target variable and prediction
-                    y_val, pred_val, y_oos_val, pred_oos_val = sess.run(
+                    y_val, pred_val, y_oos_val, pred_oos_val, \
+                        pearson_corr_is_val, pearson_corr_oos_val, loss_val, summary = sess.run(
                         [
                             self.graph_keys['y'],
                             self.graph_keys['pred'],
                             self.graph_keys['y_oos'],
-                            self.graph_keys['pred_oos']
+                            self.graph_keys['pred_oos'],
+                            self.graph_keys['pearson_corr_is'],
+                            self.graph_keys['pearson_corr_oos'],
+                            self.graph_keys['loss'],
+                            self.graph_keys['summary_op']
                         ],
                         feed_dict={
                             self.graph_keys['X']: batch_X,
@@ -621,23 +630,8 @@ class LSTM:
                     else:
                         self.all_predicted_oos = np.r_[self.all_predicted_oos, np.array(pred_oos_val)]
 
-                    # Calculate batch correlation, loss, and summary
-                    pearson_corr_is_val, pearson_corr_oos_val, loss_val, summary = sess.run(
-                        [
-                            self.graph_keys['pearson_corr_is'],
-                            self.graph_keys['pearson_corr_oos'],
-                            self.graph_keys['loss'],
-                            self.graph_keys['summary_op']
-                        ],
-                        feed_dict={
-                            self.graph_keys['X']: batch_X,
-                            self.graph_keys['y']: batch_y,
-                            self.graph_keys['keep_prob']: 1.0,
-                            self.graph_keys['in_sample_cutoff']: in_sample_size
-                        }
-                    )
-                    pearson_corr_is_val = pearson_corr_is_val[0, 0]  # Taking the corr of first output only
-                    pearson_corr_oos_val = pearson_corr_oos_val[0, 0]  # Taking the corr of the first output only
+                    pearson_corr_is_val = np.diagonal(pearson_corr_is_val)[0]  # Taking the corr of first output only
+                    pearson_corr_oos_val = np.diagonal(pearson_corr_oos_val)[0]  # Taking the corr of the first output only
 
                     self.all_corr_is.append(pearson_corr_is_val)
                     self.all_corr_oos.append(pearson_corr_oos_val)
@@ -720,7 +714,7 @@ class LSTM:
                 self.all_losses_per_epoch.append(loss_epoch)
                 self.all_corr_oos_per_epoch.append(corr_epoch_oos)
                 log.info(
-                    f'[{self.sessid}] Epoch {i}: total loss: {loss_epoch}, '
+                    f'[{self.sessid}] Epoch {i}: total loss: {loss_epoch:.1f}, '
                     f'total oos pearson corr: {corr_epoch_oos:8.5f}'
                 )
                 log.info(
