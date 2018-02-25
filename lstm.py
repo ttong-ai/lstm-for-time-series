@@ -86,7 +86,7 @@ class LSTM:
                  activation=tf.nn.relu, keep_prob=0.5, l1_reg=1e-2, l2_reg=1e-3,
                  start_learning_rate=0.001, decay_steps=1, decay_rate=0.3,
                  inner_iteration=10, forward_step=1, create_graph=True,
-                 scope='lstm', log_dir='logs', model_dir='saved_models'):
+                 scope='lstm', log_dir='logs', model_dir='saved_models', verbose=0):
         self.n_input_features = n_input_features
         self.n_output_features = n_output_features
         self.batch_size = batch_size
@@ -136,7 +136,7 @@ class LSTM:
         # You can always reset_graph and recreate new ones later.
         if create_graph:
             try:
-                self.create_lstm_graph(n_input_features=n_input_features)
+                self.create_lstm_graph(n_input_features=n_input_features, verbose=verbose)
                 self.graph_ready = True
             except Exception as msg:
                 print("Exception occurred during graph creation.  Check input parameters, especially n_input_features.")
@@ -161,7 +161,7 @@ class LSTM:
                       activation=activation, keep_prob=keep_prob, l1_reg=l1_reg, l2_reg=l2_reg,
                       start_learning_rate=start_learning_rate, decay_steps=decay_steps, decay_rate=decay_rate,
                       inner_iteration=iter_per_id, forward_step=forward_step, create_graph=create_graph,
-                      scope=scope, log_dir=log_dir, model_dir=model_dir)
+                      scope=scope, log_dir=log_dir, model_dir=model_dir, verbose=verbose)
 
     def logging_session_parameters(self, log=None):
         if log is None:
@@ -308,7 +308,7 @@ class LSTM:
                             elif self.cell_type == 'RNN':
                                 rnn_layers = [
                                     tf.nn.rnn_cell.DropoutWrapper(
-                                        tf.nn.rnn_cell.RNNCell(num_units=self.n_states, activation=self.activation),
+                                        tf.nn.rnn_cell.BasicRNNCell(num_units=self.n_states, activation=self.activation),
                                         output_keep_prob=self.keep_prob
                                     )
                                     for _ in range(self.n_layers)
@@ -348,14 +348,8 @@ class LSTM:
                             with tf.name_scope('pred'):
                                 # states[-1][1] is the h states of the last layer LSTM cell
                                 if self.cell_type == 'LSTM':
-                                    if verbose >= 2:
-                                        print('states', states)
-                                        print('W_f1', W_fc1)
                                     pred = tf.matmul(states[-1][1], W_fc1) + b_fc1  # [None, n_output_features]
                                 else:
-                                    if verbose >= 2:
-                                        print('states', states)
-                                        print('W_f1', W_fc1)
                                     pred = tf.matmul(states[-1], W_fc1) + b_fc1  # [None, n_output_features]
 
                     # Placeholder for the output (label)
@@ -587,9 +581,6 @@ class LSTM:
                     assert (y_val[in_sample_size:] == y_oos_val).all()
                     assert (pred_val[in_sample_size:] == pred_oos_val).all()
 
-                    if verbose >= 2:
-                        pass
-
                     # reverse transform before recording the results
                     # if no reverse transform is desired inside training, use default y_is_mean=0.0 and y_is_std=1.0
                     y_val = np.array(y_val) * y_is_std + y_is_mean
@@ -656,13 +647,13 @@ class LSTM:
                                 f'rnn/multi_rnn_cell/cell_{self.n_layers-1}/gru_cell/gates/kernel:0'
                             )
                             gru_gates_biases = self.graph.get_tensor_by_name(
-                                f'rnn/multi_rnn_cell/cell_{self.n_layers-1}/gru_cell/gates/biases:0'
+                                f'rnn/multi_rnn_cell/cell_{self.n_layers-1}/gru_cell/gates/bias:0'
                             )
                             gru_candidate_weights = self.graph.get_tensor_by_name(
                                 f'rnn/multi_rnn_cell/cell_{self.n_layers-1}/gru_cell/candidate/kernel:0'
                             )
                             gru_candidate_biases = self.graph.get_tensor_by_name(
-                                f'rnn/multi_rnn_cell/cell_{self.n_layers-1}/gru_cell/candidate/biases:0'
+                                f'rnn/multi_rnn_cell/cell_{self.n_layers-1}/gru_cell/candidate/bias:0'
                             )
                             self.cell_states['gru_gates_weights'] = gru_gates_weights.eval()
                             self.cell_states['gru_gates_biases'] = gru_gates_biases.eval()
@@ -670,7 +661,14 @@ class LSTM:
                             self.cell_states['gru_candidate_biases'] = gru_candidate_biases.eval()
 
                         elif self.cell_type == 'RNN':
-                            pass
+                            rnn_kernel_weights = self.graph.get_tensor_by_name(
+                                f'rnn/multi_rnn_cell/cell_{self.n_layers-1}/basic_rnn_cell/kernel:0'
+                            )
+                            rnn_kernel_biases = self.graph.get_tensor_by_name(
+                                f'rnn/multi_rnn_cell/cell_{self.n_layers-1}/basic_rnn_cell/bias:0'
+                            )
+                            self.cell_states['rnn_kernel_weights'] = rnn_kernel_weights.eval()
+                            self.cell_states['rnn_kernel_biases'] = rnn_kernel_biases.eval()
                         else:
                             assert False
 
@@ -711,12 +709,13 @@ class LSTM:
                 self.all_corr_oos_per_epoch.append(corr_epoch_oos)
                 log.info(f'[{self.sessid}] Epoch {i} total out-of-sample pearson corr: {corr_epoch_oos:8.5f}')
                 log.info(
-                    f"[{self.sessid}] Epoch {i} Ends ======================================================")
+                    f"[{self.sessid}] Epoch {i} Ends ======================================================"
+                )
                 try:
                     _ = self.model_saver.save(sess, os.path.join(self.model_dir, f"model_epoch_{i}.ckpt"))
                     log.info("Model checkpoint successfully saved.")
-                except Exception as msg:
-                    log.info("Model checkpoint save unsuccessful: ", msg)
+                except Exception:
+                    log.info("Model checkpoint save unsuccessful")
                 i += 1  # onto next epoch
 
             results = dict(
