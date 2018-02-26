@@ -810,6 +810,10 @@ class LSTM:
             self.logging_session_parameters()
 
             for batch_X in data_feeder():
+                # In the case that training feeder is used to feed data, we only take the first input, batch_X
+                if isinstance(batch_X, tuple):
+                    batch_X = batch_X[0]
+
                 total_sample_size = batch_X.shape[0]
                 # Obtain out of sample target variable and prediction
                 pred_val = sess.run(
