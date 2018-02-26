@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
+# lstm.py
 # author: Tony Tong (taotong@berkeley.edu)
 
 import numpy as np
 import random
 import string
 import os
+from functools import partial
 from time import time
 import tensorflow as tf
 from tensorflow.python.client import device_lib
@@ -65,8 +67,9 @@ def show_graph(graph_def=None, max_const_size=32):
         </div>
     """.format(data=repr(str(strip_def)), id='graph' + str(np.random.rand()))
     iframe = """
-        <iframe seamless style="width:1200px;height:620px;border:0" srcdoc="{}"></iframe>
+        <iframe seamless style="width:1600px;height:800px;border:0" srcdoc="{}"></iframe>
     """.format(code.replace('"', '&quot;'))
+    # This will display the graph inside the jupyter notebook
     display(HTML(iframe))
 
 
@@ -74,19 +77,20 @@ def id_generator(size=6, chars=string.ascii_uppercase + string.digits):
     return ''.join(random.choice(chars) for _ in range(size))
 
 
-class LSTM(object):
+class LSTM:
     """Container for multi-time-step and multi-layered LSTM framework"""
     global logger
 
     def __init__(self, n_input_features=None, n_output_features=1, batch_size=None,
-                 n_states=50, n_layers=1, n_time_steps=10,
+                 cell_type='LSTM', n_states=50, n_layers=1, n_time_steps=10,
                  activation=tf.nn.relu, keep_prob=0.5, l1_reg=1e-2, l2_reg=1e-3,
                  start_learning_rate=0.001, decay_steps=1, decay_rate=0.3,
                  inner_iteration=10, forward_step=1, create_graph=True,
-                 scope='lstm', log_dir='logs', model_dir='saved_models'):
+                 scope='lstm', log_dir='logs', model_dir='saved_models', verbose=0):
         self.n_input_features = n_input_features
         self.n_output_features = n_output_features
         self.batch_size = batch_size
+        self.cell_type = cell_type.upper()
         self.n_states = n_states
         self.n_layers = n_layers
         self.n_time_steps = n_time_steps
@@ -110,18 +114,17 @@ class LSTM(object):
         self.model_dir = model_dir
 
         # results holder
-        self.all_actual = None
-        self.all_predicted = None
+        self.all_actual_is = None
+        self.all_actual_oos = None
+        self.all_predicted_is = None
+        self.all_predicted_oos = None
         self.all_epochs = []
         self.all_losses_per_epoch = []
         self.all_corr_oos_per_epoch = []
         self.all_corr_is = []
         self.all_corr_oos = []
-
-        self.lstm_kernel_weights = None
-        self.lstm_kernel_biases = None
-        self.fc_weights = None
-        self.fc_biases = None
+        self.cell_states = dict()  # dictionary holding the last layer rnn cell states
+        self.fc_states = dict()  # dictionary holding the rnn to output fc layer states
 
         # Locate available computing devices and save in self.device_list
         self.device_list = self.find_compute_devices()
@@ -131,11 +134,11 @@ class LSTM(object):
             print(msg)
             self.compute_device = self.device_list['cpu'][0]  # default to cpu as computing device
 
-        # If create_graph is set to True, then create the graph.
+        # If create_graph is set to True, then create the graph directly during the initiation.
         # You can always reset_graph and recreate new ones later.
         if create_graph:
             try:
-                self.create_lstm_graph(n_input_features=n_input_features)
+                self.create_lstm_graph(n_input_features=n_input_features, verbose=verbose)
                 self.graph_ready = True
             except Exception as msg:
                 print("Exception occurred during graph creation.  Check input parameters, especially n_input_features.")
@@ -144,22 +147,24 @@ class LSTM(object):
 
 
     def __call__(self, n_input_features=None, n_output_features=1, batch_size=None,
-                 n_states=50, n_layers=1, n_time_steps=10,
+                 cell_type='LSTM', n_states=50, n_layers=1, n_time_steps=10,
                  activation=tf.nn.relu, keep_prob=0.5, l1_reg=1e-2, l2_reg=1e-3,
                  start_learning_rate=0.001, decay_steps=1, decay_rate=0.3,
                  iter_per_id=10, forward_step=1, create_graph=True,
-                 scope='lstm', log_dir='logs', model_dir='saved_models'):
+                 scope='lstm', log_dir='logs', model_dir='saved_models', verbose=0):
         """A wrapper for calling the __init__ function"""
 
         if self.graph is not None:
+            if verbose >= 1:
+                print("Warning: current graph if defined will be lost. ")
             del self.graph
 
         self.__init__(n_input_features=n_input_features, n_output_features=n_output_features, batch_size=batch_size,
-                      n_states=n_states, n_layers=n_layers, n_time_steps=n_time_steps,
+                      cell_type=cell_type, n_states=n_states, n_layers=n_layers, n_time_steps=n_time_steps,
                       activation=activation, keep_prob=keep_prob, l1_reg=l1_reg, l2_reg=l2_reg,
                       start_learning_rate=start_learning_rate, decay_steps=decay_steps, decay_rate=decay_rate,
                       inner_iteration=iter_per_id, forward_step=forward_step, create_graph=create_graph,
-                      scope=scope, log_dir=log_dir, model_dir=model_dir)
+                      scope=scope, log_dir=log_dir, model_dir=model_dir, verbose=verbose)
 
 
     def logging_session_parameters(self, log=None):
@@ -167,8 +172,9 @@ class LSTM(object):
             log = logger
         log.info(f"[{self.sessid}] Session start")
         log.info(f"[{self.sessid}] Input features: {self.n_input_features}")
-        log.info(f"[{self.sessid}] Num of units in each LSTM cell: {self.n_states}")
-        log.info(f"[{self.sessid}] Num of stacked LSTM layers: {self.n_layers}")
+        log.info(f"[{self.sessid}] Output features: {self.n_output_features}")
+        log.info(f"[{self.sessid}] Num of units in each {self.cell_type} cell: {self.n_states}")
+        log.info(f"[{self.sessid}] Num of stacked {self.cell_type} layers: {self.n_layers}")
         log.info(f"[{self.sessid}] Num of unrolled time steps: {self.n_time_steps}")
         log.info(f"[{self.sessid}] Activation function: {self.activation.__name__}")
         log.info(f"[{self.sessid}] Dropout rate during training: {1 - self.keep_prob}")
@@ -177,12 +183,17 @@ class LSTM(object):
         log.info(f"[{self.sessid}] Start learning rate: {self.start_learning_rate}")
         log.info(f"[{self.sessid}] Learning rate decay steps: {self.decay_steps}")
         log.info(f"[{self.sessid}] Learning rate decay rate: {self.decay_rate}")
-        log.info(f"[{self.sessid}] Inner iteration per id: {self.inner_iteration}")
+        log.info(f"[{self.sessid}] Inner iterations: {self.inner_iteration}")
         log.info(f"[{self.sessid}] Forward prediction period: {self.forward_step}")
 
 
     @staticmethod
     def find_compute_devices():
+        """Find available compute devices (gpu's and cpu's) on the local node and store them as a dictionary.
+        Note:
+            Tensorflow lumps all available cpu cores together as a single cpu resource.  GPU devices will be
+            separate.
+        """
         device_list = device_lib.list_local_devices()
         gpu, cpu = [], []
         for device in device_list:
@@ -191,16 +202,21 @@ class LSTM(object):
             if device.name.find('CPU') != -1:
                 cpu.append(device.name)
         assert len(cpu) >= 1  # assert at least cpu resource is available
-        return dict({'gpu': gpu, 'cpu': cpu})
+        return dict(gpu=gpu, cpu=cpu)
 
 
     def show_compute_devices(self):
+        """Show available compute devices on the local node"""
         if self.compute_device is None:
             self.device_list = self.find_compute_devices()
         print("Following compute devices available\n  ", self.device_list)
 
 
     def set_compute_device(self, type='gpu', seq=0):
+        """Set compute device for this tensorflow graph.
+        Currently, the entire graph needs to stay in one device.  In the future, distributed graph across GPU's
+        will be attempted.
+        """
         try:
             self.compute_device = self.device_list[type][seq]
         except (KeyError, IndexError) as msg:
@@ -210,19 +226,23 @@ class LSTM(object):
 
 
     def reset_graph(self):
+        """Reset existing tensorflow graph and create an empty tf.Graph() object"""
         del self.graph
         self.graph = tf.Graph()
 
 
     def show_graph(self, max_const_size=32):
+        """Show existing tensorflow graph inside jupyter notebook"""
         show_graph(self.graph.as_graph_def(), max_const_size)
 
 
     @staticmethod
     def get_tf_normal_variable(shape, mean=0.0, stddev=0.6, name=None):
+        """Obtain a tf.Variable with desired shape and to be initialized with truncated normal
+        distribution.
+        """
         return tf.Variable(tf.truncated_normal(shape, mean=mean, stddev=stddev),
                            validate_shape=False, name=name)
-
 
     def create_lstm_graph(self, n_input_features=None, reset_graph=True, log=None, verbose=0):
         """Build the Tensorflow based LSTM network
@@ -274,14 +294,39 @@ class LSTM(object):
                             # Adding dropout wrapper layer and LSTM cells with the number of hidden units
                             # in each LSTMCell as n_states.
                             # We have disabled the use_peepholes for now, can experiment its effect in the future.
-                            lstm_layers = [
-                                tf.nn.rnn_cell.DropoutWrapper(
-                                    tf.nn.rnn_cell.LSTMCell(num_units=self.n_states, use_peepholes=False,
-                                                            forget_bias=1.0, activation=self.activation,
-                                                            state_is_tuple=True), output_keep_prob=self.keep_prob)
-                                for _ in range(self.n_layers)
-                            ]
-                            multilayer_cell = tf.nn.rnn_cell.MultiRNNCell(lstm_layers, state_is_tuple=True)
+                            if self.cell_type == 'LSTM':
+                                lstm_layers = [
+                                    tf.nn.rnn_cell.DropoutWrapper(
+                                        tf.nn.rnn_cell.LSTMCell(num_units=self.n_states, use_peepholes=False,
+                                                                forget_bias=1.0, activation=self.activation,
+                                                                state_is_tuple=True),
+                                        output_keep_prob=self.keep_prob
+                                    )
+                                    for _ in range(self.n_layers)
+                                ]
+                                multilayer_cell = tf.nn.rnn_cell.MultiRNNCell(lstm_layers, state_is_tuple=True)
+
+                            elif self.cell_type == 'GRU':
+                                gru_layers = [
+                                    tf.nn.rnn_cell.DropoutWrapper(
+                                        tf.nn.rnn_cell.GRUCell(num_units=self.n_states, activation=self.activation),
+                                        output_keep_prob=self.keep_prob
+                                    )
+                                    for _ in range(self.n_layers)
+                                ]
+                                multilayer_cell = tf.nn.rnn_cell.MultiRNNCell(gru_layers, state_is_tuple=True)
+
+                            elif self.cell_type == 'RNN':
+                                rnn_layers = [
+                                    tf.nn.rnn_cell.DropoutWrapper(
+                                        tf.nn.rnn_cell.BasicRNNCell(num_units=self.n_states, activation=self.activation),
+                                        output_keep_prob=self.keep_prob
+                                    )
+                                    for _ in range(self.n_layers)
+                                ]
+                                multilayer_cell = tf.nn.rnn_cell.MultiRNNCell(rnn_layers, state_is_tuple=True)
+                            else:
+                                assert False, f"cell_type {self.cell_type} is not recognized"
 
                         with tf.name_scope('dynamical_unrolling'):
                             # init_states = []
@@ -300,7 +345,7 @@ class LSTM(object):
                             # It is a tuple with elements corresponding to n_layers. Each tuple element itself
                             # is a LSTMStateTuple with c and h tensors.
                             outputs, states = tf.nn.dynamic_rnn(cell=multilayer_cell, inputs=X,
-                                                                initial_state=None, dtype=tf.float32, #tuple(init_states)
+                                                                initial_state=None, dtype=tf.float32,
                                                                 swap_memory=True, time_major=False)
 
                         # Use a fully-connected layer to convert the multi-state vector into a single
@@ -312,8 +357,11 @@ class LSTM(object):
                             with tf.name_scope('b'):
                                 b_fc1 = self.get_tf_normal_variable([self.n_output_features], name='b_fc1')
                             with tf.name_scope('pred'):
-                                # states[-1][1] is the h states of the last layer cell
-                                pred = tf.matmul(states[-1][1], W_fc1) + b_fc1  # [None, n_output_features]
+                                # states[-1][1] is the h states of the last layer LSTM cell
+                                if self.cell_type == 'LSTM':
+                                    pred = tf.matmul(states[-1][1], W_fc1) + b_fc1  # [None, n_output_features]
+                                else:
+                                    pred = tf.matmul(states[-1], W_fc1) + b_fc1  # [None, n_output_features]
 
                     # Placeholder for the output (label)
                     with tf.name_scope('label'):
@@ -328,6 +376,7 @@ class LSTM(object):
                         pred_oos = pred[in_sample_cutoff:, :]
 
                     with tf.name_scope('stats'):
+                        epsilon = 1.e-4
                         # Pearson correlation to evaluate the model, here is for in-sample training data
                         covariance_is = tf.matmul(
                             tf.transpose(tf.subtract(pred_is, tf.reduce_mean(pred_is, axis=0, keepdims=True))),
@@ -341,7 +390,7 @@ class LSTM(object):
                         )  # variance of y_is, shape [1, n_output_features]
                         # pearson correlation matrix, shape [n_output_features, n_output_features]
                         pearson_corr_is = tf.div(
-                            covariance_is, tf.sqrt(tf.matmul(tf.transpose(var_pred_is), var_y_is)),
+                            covariance_is, tf.sqrt(tf.matmul(tf.transpose(var_pred_is), var_y_is)) + epsilon,
                             name='pearson_corr_is'
                         )
 
@@ -358,7 +407,7 @@ class LSTM(object):
                         )  # variance of y_oos, shape [1, n_output_features]
                         # pearson correlation matrix, shape [n_output_features, n_output_features]
                         pearson_corr_oos = tf.div(
-                            covariance_oos, tf.sqrt(tf.matmul(tf.transpose(var_pred_oos), var_y_oos)),
+                            covariance_oos, tf.sqrt(tf.matmul(tf.transpose(var_pred_oos), var_y_oos)) + epsilon,
                             name='pearson_corr_oos'
                         )
 
@@ -392,8 +441,10 @@ class LSTM(object):
                         # this the loss function for optimization purpose
                         loss = tf.nn.l2_loss(tf.subtract(y_is, pred_is)) + \
                                tf.contrib.layers.apply_regularization(
-                                   tf.contrib.layers.l1_l2_regularizer(scale_l1=self.l1_reg_scale,
-                                                                       scale_l2=self.l2_reg_scale),
+                                   tf.contrib.layers.l1_l2_regularizer(
+                                       scale_l1=self.l1_reg_scale,
+                                       scale_l2=self.l2_reg_scale
+                                   ),
                                    tf.trainable_variables()
                                )
 
@@ -446,10 +497,10 @@ class LSTM(object):
                         summary_op=summary_op,
                         writer=writer
                     )
+    # end create_lstm_graph
 
-
-    def train(self, batch_X=None, batch_y=None, in_sample_size=None, data_feeder=None,
-              restore_model=False, pre_trained_model=None, epoch_prev=0, epoch_end=21,
+    def train(self, batch_X=None, batch_y=None, in_sample_size=None, y_is_mean=0.0, y_is_std=1.0, data_feeder=None,
+              restore_model=False, pre_trained_model=None, epoch_prev=0, epoch_end=21, inner_iteration=None,
               step=1, writer_step=1, display_step=50, return_weights=False, log=None, verbose=0):
         """Perform training of the LSTM network on specified compute device.
         There are two ways of feeding in data:
@@ -471,6 +522,12 @@ class LSTM(object):
         if self.graph is None:
             log.warning("No graph available for training.  Need to create compute graph first.")
             return None
+
+        # If batch data are specifically provided, it will take priority over data_feeder
+        if batch_X is not None and batch_y is not None and in_sample_size is not None \
+                and y_is_mean is not None and y_is_std is not None:
+            def data_feeder():
+                return [(batch_X, batch_y, y_is_mean, y_is_std, in_sample_size, total_sample_size)]
 
         # Launch a tensorflow compute session
         with tf.Session(graph=self.graph,
@@ -498,13 +555,25 @@ class LSTM(object):
             while i <= epoch_end:
                 log.info(f"[{self.sessid}] Epoch {i} Starts ******************************************************")
                 tic = time()
-                actual = None
-                predicted = None
-                epoch_loss = 0.0
-                for batch_X, batch_y, this_mean, this_std, in_sample_size, total_sample_size in data_feeder():
+                actual_oos = None
+                predicted_oos = None
+                loss_epoch = 0.0
+
+                for batch_X, batch_y, y_is_mean, y_is_std, in_sample_size in data_feeder():
+                    total_sample_size = batch_X.shape[0]
+                    if np.isfinite(batch_X).sum() != batch_X.size or \
+                       np.isfinite(batch_y).sum() != batch_y.size:
+                        continue
+                    assert np.isfinite(y_is_mean).sum() == y_is_mean.size
+                    assert np.isfinite(y_is_std).sum() == y_is_std.size
+                    assert in_sample_size <= total_sample_size, "in_sample_size needs to be smaller than total"
+
+                    # if inner_iteration is passed in, then it takes priority over internal state
+                    if inner_iteration is None:
+                        inner_iteration = self.inner_iteration
                     # Run optimization
-                    # Note: drop is for training only
-                    for _ in range(self.inner_iteration):
+                    # Note: dropout is intended for training only
+                    for _ in range(inner_iteration):
                         _, current_rate, states_val = sess.run(
                             [
                                 self.graph_keys['optimizer'],
@@ -519,54 +588,16 @@ class LSTM(object):
                                 self.graph_keys['global_step']: i / epoch_end
                             }
                         )
-
+                    if verbose >= 3:  # DEBUG
+                        print("states_val", states_val)
                     # Obtain out of sample target variable and prediction
-                    y_val, pred_val, y_oos_val, pred_oos_val = sess.run(
+                    y_val, pred_val, y_oos_val, pred_oos_val, \
+                        pearson_corr_is_val, pearson_corr_oos_val, loss_val, summary = sess.run(
                         [
                             self.graph_keys['y'],
                             self.graph_keys['pred'],
                             self.graph_keys['y_oos'],
-                            self.graph_keys['pred_oos']
-                        ],
-                        feed_dict={
-                            self.graph_keys['X']: batch_X,
-                            self.graph_keys['y']: batch_y,
-                            self.graph_keys['keep_prob']: 1.0,  # needs to be 1.0 for prediction
-                            self.graph_keys['in_sample_cutoff']: in_sample_size
-                        }
-                    )
-
-                    # reverse transform before recording the results
-                    y_val = np.array(y_val) * this_std + this_mean
-                    y_oos_val = np.array(y_oos_val) * this_std + this_mean
-                    pred_val = np.array(pred_val) * this_std + this_mean
-                    pred_oos_val = np.array(pred_oos_val) * this_std + this_mean
-
-                    # record the results
-                    if actual is None:
-                        actual = np.array(y_oos_val)
-                    else:
-                        actual = np.r_[actual, np.array(y_val)]
-
-                    if predicted is None:
-                        predicted = np.array(pred_oos_val)
-                    else:
-                        predicted = np.r_[predicted, np.array(pred_oos_val)]
-
-                    if self.all_actual is None:
-                        self.all_actual = np.array(y_oos_val)
-                    else:
-                        self.all_actual = np.r_[actual, np.array(y_val)]
-
-                    if self.all_predicted is None:
-                        self.all_predicted = np.array(pred_oos_val)
-                    else:
-                        self.all_predicted = np.r_[predicted, np.array(pred_oos_val)]
-
-                    # Calculate batch accuracy
-                    # Calculate batch loss
-                    pearson_corr_is_val, pearson_corr_oos_val, loss_val, summary = sess.run(
-                        [
+                            self.graph_keys['pred_oos'],
                             self.graph_keys['pearson_corr_is'],
                             self.graph_keys['pearson_corr_oos'],
                             self.graph_keys['loss'],
@@ -575,26 +606,113 @@ class LSTM(object):
                         feed_dict={
                             self.graph_keys['X']: batch_X,
                             self.graph_keys['y']: batch_y,
-                            self.graph_keys['keep_prob']: 1.0,
+                            self.graph_keys['keep_prob']: 1.0,  # needs to be 1.0 for prediction
                             self.graph_keys['in_sample_cutoff']: in_sample_size
                         }
                     )
-                    pearson_corr_is_val = pearson_corr_is_val[0, 0]  # A correlation matrix
-                    pearson_corr_oos_val = pearson_corr_oos_val[0, 0]  # A correlation matrix
+                    if verbose >= 3:  # DEBUG
+                        print("y_val", y_val)
+                        print("pred_val", pred_val)
+                    assert (y_val[in_sample_size:, ] == y_oos_val).all(), \
+                        "y_val and y_oos_val fails, likely nan."
+                    assert (pred_val[in_sample_size:, ] == pred_oos_val).all(), \
+                        "pred_val and pred_oos_val fails, likely nan."
+
+                    # reverse transform before recording the results
+                    # if no reverse transform is desired inside training, use default y_is_mean=0.0 and y_is_std=1.0
+                    y_val = np.array(y_val) * y_is_std + y_is_mean
+                    y_oos_val = np.array(y_oos_val) * y_is_std + y_is_mean
+                    pred_val = np.array(pred_val) * y_is_std + y_is_mean
+                    pred_oos_val = np.array(pred_oos_val) * y_is_std + y_is_mean
+
+                    # record the results
+                    if actual_oos is None:
+                        actual_oos = np.array(y_oos_val)
+                    else:
+                        actual_oos = np.r_[actual_oos, np.array(y_oos_val)]
+
+                    if predicted_oos is None:
+                        predicted_oos = np.array(pred_oos_val)
+                    else:
+                        predicted_oos = np.r_[predicted_oos, np.array(pred_oos_val)]
+
+                    if self.all_actual_is is None:
+                        self.all_actual_is = np.array(y_val[0:in_sample_size, :])
+                    else:
+                        self.all_actual_is = np.r_[self.all_actual_is, np.array(y_val[0:in_sample_size, :])]
+
+                    if self.all_actual_oos is None:
+                        self.all_actual_oos = np.array(y_oos_val)
+                    else:
+                        self.all_actual_oos = np.r_[self.all_actual_oos, np.array(y_oos_val)]
+
+                    if self.all_predicted_is is None:
+                        self.all_predicted_is = np.array(pred_val[0:in_sample_size, :])
+                    else:
+                        self.all_predicted_is = np.r_[self.all_predicted_is, np.array(pred_val[0:in_sample_size, :])]
+
+                    if self.all_predicted_oos is None:
+                        self.all_predicted_oos = np.array(pred_oos_val)
+                    else:
+                        self.all_predicted_oos = np.r_[self.all_predicted_oos, np.array(pred_oos_val)]
+
+                    pearson_corr_is_val = np.diagonal(pearson_corr_is_val)[0]  # Taking the corr of first output only
+                    pearson_corr_oos_val = np.diagonal(pearson_corr_oos_val)[0]  # Taking the corr of the first output only
 
                     self.all_corr_is.append(pearson_corr_is_val)
                     self.all_corr_oos.append(pearson_corr_oos_val)
-                    epoch_loss += loss_val
+                    loss_epoch += loss_val
 
                     if return_weights:
-                        lstm_kernel_weights = self.graph.get_tensor_by_name('rnn/multi_rnn_cell/cell_0/lstm_cell/kernel:0')
-                        lstm_kernel_biases = self.graph.get_tensor_by_name('rnn/multi_rnn_cell/cell_0/lstm_cell/bias:0')
-                        fc_weights = self.graph.get_tensor_by_name('lstm/model/fc1/W/W_fc1:0')
-                        fc_biases = self.graph.get_tensor_by_name('lstm/model/fc1/b/b_fc1:0')
-                        self.lstm_kernel_weights = lstm_kernel_weights.eval()
-                        self.lstm_kernel_biases = lstm_kernel_biases.eval()
-                        self.fc_weights = fc_weights.eval()
-                        self.fc_biases = fc_biases.eval()
+                        if self.cell_type == 'LSTM':
+                            lstm_kernel_weights = self.graph.get_tensor_by_name(
+                                f'rnn/multi_rnn_cell/cell_{self.n_layers-1}/lstm_cell/kernel:0'
+                            )
+                            lstm_kernel_biases = self.graph.get_tensor_by_name(
+                                f'rnn/multi_rnn_cell/cell_{self.n_layers-1}/lstm_cell/bias:0'
+                            )
+                            self.cell_states['lstm_kernel_weights'] = lstm_kernel_weights.eval()
+                            self.cell_states['lstm_kernel_biases'] = lstm_kernel_biases.eval()
+
+                        elif self.cell_type == 'GRU':
+                            gru_gates_weights = self.graph.get_tensor_by_name(
+                                f'rnn/multi_rnn_cell/cell_{self.n_layers-1}/gru_cell/gates/kernel:0'
+                            )
+                            gru_gates_biases = self.graph.get_tensor_by_name(
+                                f'rnn/multi_rnn_cell/cell_{self.n_layers-1}/gru_cell/gates/bias:0'
+                            )
+                            gru_candidate_weights = self.graph.get_tensor_by_name(
+                                f'rnn/multi_rnn_cell/cell_{self.n_layers-1}/gru_cell/candidate/kernel:0'
+                            )
+                            gru_candidate_biases = self.graph.get_tensor_by_name(
+                                f'rnn/multi_rnn_cell/cell_{self.n_layers-1}/gru_cell/candidate/bias:0'
+                            )
+                            self.cell_states['gru_gates_weights'] = gru_gates_weights.eval()
+                            self.cell_states['gru_gates_biases'] = gru_gates_biases.eval()
+                            self.cell_states['gru_candidate_weights'] = gru_candidate_weights.eval()
+                            self.cell_states['gru_candidate_biases'] = gru_candidate_biases.eval()
+
+                        elif self.cell_type == 'RNN':
+                            rnn_kernel_weights = self.graph.get_tensor_by_name(
+                                f'rnn/multi_rnn_cell/cell_{self.n_layers-1}/basic_rnn_cell/kernel:0'
+                            )
+                            rnn_kernel_biases = self.graph.get_tensor_by_name(
+                                f'rnn/multi_rnn_cell/cell_{self.n_layers-1}/basic_rnn_cell/bias:0'
+                            )
+                            self.cell_states['rnn_kernel_weights'] = rnn_kernel_weights.eval()
+                            self.cell_states['rnn_kernel_biases'] = rnn_kernel_biases.eval()
+                        else:
+                            assert False
+
+                        # fully-connected layer between last rnn cell to output
+                        fc_weights = self.graph.get_tensor_by_name(
+                            f'{self.scope}/model/fc1/W/W_fc1:0'
+                        )
+                        fc_biases = self.graph.get_tensor_by_name(
+                            f'{self.scope}/model/fc1/b/b_fc1:0'
+                        )
+                        self.fc_states['weights'] = fc_weights.eval()
+                        self.fc_states['biases'] = fc_biases.eval()
 
                     # Once every display_step show some diagnostics - the loss function, in-sample correlation, etc.
                     if step % display_step == 0:
@@ -610,18 +728,30 @@ class LSTM(object):
                     step += 1  # finishes this id, continue to next id step
 
                 # epoch finishes
-                corr_epoch_oos = np.corrcoef(actual.reshape(1,-1), predicted.reshape(1,-1))[0, 1]
+                if verbose >= 2:
+                    print("actual shape: ", actual_oos.shape)
+                    print("predicted shape: ", predicted_oos.shape)
+
+                corr_epoch_oos = np.corrcoef(actual_oos.reshape(1, -1), predicted_oos.reshape(1, -1))[0, 1]
+                if verbose >= 2:
+                    print(corr_epoch_oos)
+
                 self.all_epochs.append(i)
-                self.all_losses_per_epoch.append(epoch_loss)
+                self.all_losses_per_epoch.append(loss_epoch)
                 self.all_corr_oos_per_epoch.append(corr_epoch_oos)
-                log.info(f'[{self.sessid}] Epoch {i} total out-of-sample pearson corr: {corr_epoch_oos:8.5f}')
                 log.info(
-                    f"[{self.sessid}] Epoch {i} Ends ======================================================")
+                    f'[{self.sessid}] Epoch {i}: total loss: {loss_epoch:.1f}, '
+                    f'total oos pearson corr: {corr_epoch_oos:8.5f}'
+                )
+                log.info(
+                    f"[{self.sessid}] Epoch {i} Ends ======================================================"
+                )
                 try:
-                    _ = self.model_saver.save(sess, os.path.join(self.model_dir, f"model_epoch_{i}.ckpt"))
+                    _ = self.model_saver.save(sess, os.path.join(self.model_dir, f"{self.sessid}_epoch_{i}.ckpt"))
+                    _ = self.model_saver.save(sess, f"./{self.sessid}_latest.ckpt")
                     log.info("Model checkpoint successfully saved.")
-                except Exception as msg:
-                    log.info("Model checkpoint save unsuccessful: ", msg)
+                except Exception:
+                    log.info("Model checkpoint save unsuccessful")
                 i += 1  # onto next epoch
 
             results = dict(
@@ -630,18 +760,84 @@ class LSTM(object):
                 all_corr_oos_per_epoch=self.all_corr_oos_per_epoch,
                 all_corr_is=self.all_corr_is,
                 all_corr_oos=self.all_corr_oos,
-                all_actual=self.all_actual,
-                all_predicted=self.all_predicted,
+                all_actual_is=self.all_actual_is,
+                all_actual_oos=self.all_actual_oos,
+                all_predicted_is=self.all_predicted_is,
+                all_predicted_oos=self.all_predicted_oos
             )
 
             if return_weights:
                 results.update(
                     dict(
-                        lstm_kernel_weights=self.lstm_kernel_weights,
-                        lstm_kernel_biases=self.lstm_kernel_biases,
-                        fc_weights=self.fc_weights,
-                        fc_biases=self.fc_biases
+                        cell_states=self.cell_states,
+                        fc_states=self.fc_states
                     )
                 )
-
             return results
+    # end train
+
+    def predict(self, batch_X=None, data_feeder=None, restore_model=False, pre_trained_model=None, log=None):
+        """Use trained model or restore from pre-trained model to predict
+        Note: if a generator is passed in, the tensorflow Session will hold resources active until iterating
+        through the entire iterable dataset.
+        Return/Yield: predicted values
+        """
+        if log is None:
+            log = logger
+
+        if self.graph is None:
+            log.warning("No graph available for prediction.  Need to have a compute graph trained weights or "
+                        "to be loaded from pre-trained saved model.")
+            return None
+
+        # If batch data are specifically provided, it will take priority over data_feeder
+        if batch_X is not None:
+            def data_feeder():
+                return [batch_X]
+
+        # Launch a tensorflow compute session
+        with tf.Session(graph=self.graph,
+                        config=tf.ConfigProto(allow_soft_placement=True, log_device_placement=True)) as sess:
+            # Restore latest checkpoint
+            if restore_model:
+                try:
+                    self.model_saver.restore(sess, os.path.join(self.model_dir, pre_trained_model))
+                except Exception as msg:
+                    log.exception("Session restore failed: ", msg)
+                    raise Exception
+                if self.sessid is None:
+                    self.sessid = id_generator()
+                log.info(f"[{self.sessid}] Restored pre-trained model successfully")
+            else:
+                if self.sessid is None:
+                    raise ValueError(
+                        "No valid session id (sessid) from training in this active session. "
+                        "Alternatively, you may try restoring a previously trained model specifically."
+                    )
+                # Restore graph variables from training using default model persistence
+                self.model_saver.restore(sess, f"./{self.sessid}_latest.ckpt")
+            self.logging_session_parameters()
+
+            for batch_X in data_feeder():
+                total_sample_size = batch_X.shape[0]
+                # Obtain out of sample target variable and prediction
+                pred_val = sess.run(
+                    [
+                        self.graph_keys['pred'],
+                    ],
+                    feed_dict={
+                        self.graph_keys['X']: batch_X,
+                        self.graph_keys['keep_prob']: 1.0,  # needs to be 1.0 for prediction
+                        self.graph_keys['in_sample_cutoff']: total_sample_size
+                    }
+                )
+                # log.info(f'[{self.sessid}] Prediction run successful.')
+                yield pred_val
+    # end predict
+
+
+# using tf.nn.rnn_cell.GRUCell
+GRU = partial(LSTM, cell_type='GRU')
+
+# using tf.nn.rnn_cell.BasicRNNCell
+RNN = partial(LSTM, cell_type='RNN')
