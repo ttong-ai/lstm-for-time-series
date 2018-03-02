@@ -1,6 +1,16 @@
 # -*- coding: utf-8 -*-
 # lstm.py
+#
+# based on tensorflow 1.5.0 (needs Cuda 9.0 and CuDNN >7.1 support)
+#
 # author: Tony Tong (taotong@berkeley.edu, ttong@pro-ai.org)
+#
+# TODO: Write a more generalized data_feeder factory method to streamline different types of input data features.
+# TODO: Write a high-level model auto-tuning wrapper to systematically explore hyperparameter space to optimize model.
+# TODO: Add multiple GPU support for data parallelism (multiple graphs on different GPUs and trained on unified data
+# TODO:     feeder.
+# TODO: Experiment with accessing tensorflow cluster for large-scale parallelism.
+
 
 import numpy as np
 import random
