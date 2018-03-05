@@ -847,10 +847,11 @@ class LSTM:
             return results
     # end train
 
-    def predict(self, batch_X=None, data_feeder=None, pre_trained_model=None, log=None):
+    def predict(self, batch_X=None, data_feeder=None, pre_trained_model=None, device=None, log=None):
         """Use trained model or restore from pre-trained model to predict
         Note: if a generator is passed in, the tensorflow Session will hold resources active until iterating
         through the entire iterable dataset.
+        Set device to 'cpu' to use CPU for prediction
         Return/Yield: predicted values
         """
         if log is None:
@@ -867,7 +868,10 @@ class LSTM:
                 return [batch_X]
 
         # Launch a tensorflow compute session
-        if self.compute_device.find('CPU') != -1:
+        if device is None:
+            device = self.compute_device
+
+        if device.upper().find('CPU') != -1:
             config = tf.ConfigProto(device_count={'GPU': 0}, allow_soft_placement=True, log_device_placement=True)
         else:
             config = tf.ConfigProto(allow_soft_placement=True, log_device_placement=True)
