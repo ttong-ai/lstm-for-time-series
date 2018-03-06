@@ -122,4 +122,3 @@ def visualize_results(g, results, save_figure=False, save_path='results'):
     ax[1].hist(all_predicted_oos, bins=11)
     ax[1].set_xlim([-all_predicted_oos_range, all_predicted_oos_range])
     plt.tight_layout()
-    
