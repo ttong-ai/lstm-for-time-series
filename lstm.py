@@ -92,7 +92,7 @@ class LSTM:
     global logger
 
     def __init__(self, n_input_features=None, n_output_features=1, batch_size=None,
-                 cell_type='LSTM', n_states=50, n_layers=1, n_time_steps=10,
+                 cell_type='LSTM', n_states=50, n_layers=1, use_peepholes=True, n_time_steps=10,
                  activation=tf.nn.relu, keep_prob=0.5, l1_reg=1e-2, l2_reg=1e-3,
                  start_learning_rate=0.001, decay_steps=1, decay_rate=0.3,
                  inner_iteration=10, forward_step=1, create_graph=True,
@@ -104,6 +104,7 @@ class LSTM:
         self.cell_type = cell_type.upper()
         self.n_states = n_states
         self.n_layers = n_layers
+        self.use_peepholes = use_peepholes  # this is a special feature for LSTM cell
         self.n_time_steps = n_time_steps
         self.activation = activation
         self.keep_prob = keep_prob
@@ -168,9 +169,8 @@ class LSTM:
                 print("Exception message: ", msg)
                 self.graph_ready = False
 
-
     def __call__(self, n_input_features=None, n_output_features=1, batch_size=None,
-                 cell_type='LSTM', n_states=50, n_layers=1, n_time_steps=10,
+                 cell_type='LSTM', n_states=50, n_layers=1, use_peepholes=True, n_time_steps=10,
                  activation=tf.nn.relu, keep_prob=0.5, l1_reg=1e-2, l2_reg=1e-3,
                  start_learning_rate=0.001, decay_steps=1, decay_rate=0.3,
                  iter_per_id=10, forward_step=1, create_graph=True,
@@ -184,12 +184,14 @@ class LSTM:
             del self.graph
 
         self.__init__(n_input_features=n_input_features, n_output_features=n_output_features, batch_size=batch_size,
-                      cell_type=cell_type, n_states=n_states, n_layers=n_layers, n_time_steps=n_time_steps,
+                      cell_type=cell_type, n_states=n_states, n_layers=n_layers, use_peepholes=True,
+                      n_time_steps=n_time_steps,
                       activation=activation, keep_prob=keep_prob, l1_reg=l1_reg, l2_reg=l2_reg,
                       start_learning_rate=start_learning_rate, decay_steps=decay_steps, decay_rate=decay_rate,
                       inner_iteration=iter_per_id, forward_step=forward_step, create_graph=create_graph,
                       scope=scope, log_dir=log_dir, model_dir=model_dir,
-                      device=device, device_num=device_num, verbose=verbose)
+                      device=device, device_num=device_num, verbose=verbose
+                      )
 
 
     def logging_session_parameters(self, log=None):
@@ -322,7 +324,8 @@ class LSTM:
                             if self.cell_type == 'LSTM':
                                 lstm_layers = [
                                     tf.nn.rnn_cell.DropoutWrapper(
-                                        tf.nn.rnn_cell.LSTMCell(num_units=self.n_states, use_peepholes=False,
+                                        tf.nn.rnn_cell.LSTMCell(num_units=self.n_states,
+                                                                use_peepholes=self.use_peepholes,
                                                                 forget_bias=1.0, activation=self.activation,
                                                                 state_is_tuple=True),
                                         output_keep_prob=self.keep_prob
@@ -344,7 +347,8 @@ class LSTM:
                             elif self.cell_type == 'RNN':
                                 rnn_layers = [
                                     tf.nn.rnn_cell.DropoutWrapper(
-                                        tf.nn.rnn_cell.BasicRNNCell(num_units=self.n_states, activation=self.activation),
+                                        tf.nn.rnn_cell.BasicRNNCell(num_units=self.n_states,
+                                                                    activation=self.activation),
                                         output_keep_prob=self.keep_prob
                                     )
                                     for _ in range(self.n_layers)
